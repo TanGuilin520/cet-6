@@ -102,6 +102,24 @@
           <form id="review-form" novalidate hidden>
             <section class="issue-summary" id="issue-summary" aria-live="polite"></section>
 
+            <section class="agent-suggestion" id="agent-suggestion" aria-labelledby="agent-suggestion-title">
+              <header>
+                <div>
+                  <strong id="agent-suggestion-title">AI 复核建议</strong>
+                  <small>Agent 只生成候选修改，不会直接保存或发布版本。</small>
+                </div>
+                <button id="request-agent-suggestion" type="button" aria-describedby="agent-suggestion-status">获取建议</button>
+              </header>
+              <p class="agent-suggestion-status" id="agent-suggestion-status" role="status" aria-live="polite">选择一个待处理问题后，可以让 AI 对照证据生成建议。</p>
+              <div class="agent-suggestion-preview" id="agent-suggestion-preview" hidden>
+                <div id="agent-suggestion-content"></div>
+                <div class="agent-suggestion-actions">
+                  <button class="secondary-button" id="discard-agent-suggestion" type="button">忽略建议</button>
+                  <button class="agent-apply-button" id="apply-agent-suggestion" type="button">应用到表单（不会保存）</button>
+                </div>
+              </div>
+            </section>
+
             <fieldset>
               <legend>题目</legend>
               <div class="field-grid field-grid--three">

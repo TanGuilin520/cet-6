@@ -36,6 +36,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+from .agent_client import (
+    AgentClient,
+    AgentClientError,
+    AgentProtocolError,
+    AgentUnavailable,
+)
 from .paddle_ocr import PaddleOCRClient, PaddleOCRError, PaddleOCRUnavailable
 
 
@@ -1977,6 +1983,44 @@ class PlatformService:
                 paddle["message"] = "PaddleOCR 已配置但当前不可连接"
             else:
                 paddle["message"] = "PaddleOCR 配置无效"
+        agent: dict[str, object] = {
+            "configured": False,
+            "reachable": False,
+            "ready": False,
+            "engine": "langgraph",
+            "pythonVersion": None,
+            "langgraphImportReady": False,
+            "checkpointReady": False,
+            "deepseekConfigured": False,
+            "message": "未配置 Agent runtime",
+        }
+        try:
+            agent_client = AgentClient.from_environment()
+            agent["configured"] = agent_client.configured
+            if agent_client.configured:
+                agent_health = agent_client.health(timeout_seconds=1.5)
+                agent.update(
+                    {
+                        "reachable": True,
+                        "ready": bool(agent_health["ready"]),
+                        "engine": str(agent_health["engine"]),
+                        "pythonVersion": str(agent_health["pythonVersion"]),
+                        "langgraphImportReady": bool(agent_health["langgraphImportReady"]),
+                        "checkpointReady": bool(agent_health["checkpointReady"]),
+                        "deepseekConfigured": bool(agent_health["deepseekConfigured"]),
+                        "message": (
+                            "Agent runtime 可用"
+                            if agent_health["ready"]
+                            else str(agent_health["detail"] or "Agent runtime 可连接但尚未就绪")
+                        ),
+                    }
+                )
+        except AgentClientError:
+            agent["message"] = (
+                "Agent runtime 已配置但当前不可连接或响应无效"
+                if agent["configured"]
+                else "Agent runtime 配置无效"
+            )
         native_pdf = commands["pdftotext"] and commands["pdftoppm"]
         tesseract_ready = commands["tesseract"] and commands["pdftoppm"]
         scanned_pdf = bool(native_pdf and (paddle["ready"] or commands["ocrmypdf"] or tesseract_ready))
@@ -1996,6 +2040,7 @@ class PlatformService:
                 "tesseract": tesseract_ready,
                 "tesseractLanguages": _ocr_languages() if commands["tesseract"] else None,
             },
+            "agent": agent,
         }
 
     def review(self, exam_id: str) -> dict[str, object]:
@@ -2688,6 +2733,232 @@ class PlatformService:
         finally:
             connection.close()
 
+    @staticmethod
+    def _agent_page_context(
+        manifest: dict[str, object],
+        page_number: object,
+        bbox: object = None,
+    ) -> dict[str, object] | None:
+        """Return a bounded coordinate page excerpt for a review suggestion."""
+
+        if isinstance(page_number, bool) or not isinstance(page_number, int):
+            return None
+        pages = manifest.get("pages", [])
+        if not isinstance(pages, list):
+            return None
+        page = next(
+            (
+                item
+                for item in pages
+                if isinstance(item, dict) and item.get("number") == page_number
+            ),
+            None,
+        )
+        if page is None:
+            return None
+        words = page.get("words", [])
+        if not isinstance(words, list):
+            words = []
+        selected = [item for item in words if isinstance(item, dict)]
+        if isinstance(bbox, dict):
+            try:
+                x = float(bbox["x"])
+                y = float(bbox["y"])
+                width = float(bbox["width"])
+                height = float(bbox["height"])
+                page_width = float(page.get("width") or 0)
+                page_height = float(page.get("height") or 0)
+            except (KeyError, TypeError, ValueError):
+                pass
+            else:
+                padding_x = max(24.0, min(120.0, width * 0.25))
+                padding_y = max(36.0, min(180.0, height * 1.5))
+                left, top = max(0.0, x - padding_x), max(0.0, y - padding_y)
+                right = min(page_width, x + width + padding_x)
+                bottom = min(page_height, y + height + padding_y)
+
+                def overlaps(word: dict[str, object]) -> bool:
+                    try:
+                        word_x = float(word["x"])
+                        word_y = float(word["y"])
+                        word_right = word_x + float(word["width"])
+                        word_bottom = word_y + float(word["height"])
+                    except (KeyError, TypeError, ValueError):
+                        return False
+                    return word_right >= left and word_x <= right and word_bottom >= top and word_y <= bottom
+
+                selected = [word for word in selected if overlaps(word)]
+        # Keep the complete sidecar request below its 512 KiB transport cap,
+        # even when OCR words carry confidence and provenance metadata.
+        maximum_words = 400
+        return {
+            "number": page_number,
+            "width": page.get("width"),
+            "height": page.get("height"),
+            "textSource": page.get("textSource"),
+            "words": selected[:maximum_words],
+            "truncated": len(selected) > maximum_words,
+        }
+
+    def agent_review_suggestion(
+        self,
+        exam_id: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Ask the optional Agent runtime for a read-only, revision-pinned proposal."""
+
+        if set(payload) != {"issueId", "reviewRevision"}:
+            raise PlatformError("review suggestion request must contain only issueId and reviewRevision")
+        issue_id = _review_text(payload.get("issueId"), "issueId", 180, required=True)
+        expected_revision = payload.get("reviewRevision")
+        if (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise PlatformError("reviewRevision must be a non-negative integer")
+
+        with self._lock:
+            status = self.status(exam_id)
+            if status.get("status") != "ready":
+                raise PlatformError(
+                    "Agent review suggestions are available only after parsing is ready",
+                    HTTPStatus.CONFLICT,
+                )
+            snapshot, revision, _ = self._current_review_snapshot(exam_id)
+            if revision != expected_revision:
+                raise PlatformError(
+                    f"review revision changed; current revision is {revision}",
+                    HTTPStatus.CONFLICT,
+                )
+            questions_document, answers_document = self._snapshot_documents(snapshot)
+            issues = _review_issues(questions_document, answers_document)
+            issue = next(
+                (item for item in issues if isinstance(item, dict) and item.get("issueId") == issue_id),
+                None,
+            )
+            if issue is None:
+                raise PlatformError("review issue was not found in the current revision", HTTPStatus.NOT_FOUND)
+            target_id = str(issue.get("targetId") or "")
+            questions = questions_document.get("questions", [])
+            answers = answers_document.get("answers", [])
+            conflicts = answers_document.get("conflicts", [])
+            if not isinstance(questions, list) or not isinstance(answers, list) or not isinstance(conflicts, list):
+                raise PlatformError("exam review documents are invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+            question = next(
+                (
+                    item
+                    for item in questions
+                    if isinstance(item, dict) and item.get("questionId") == target_id
+                ),
+                None,
+            )
+            answer = next(
+                (
+                    item
+                    for item in answers
+                    if isinstance(item, dict) and item.get("questionId") == target_id
+                ),
+                None,
+            )
+            target_number_match = re.fullmatch(r"q([1-9][0-9]{0,2})", target_id)
+            target_number = int(target_number_match.group(1)) if target_number_match else None
+            nearby_questions = [
+                item
+                for item in questions
+                if isinstance(item, dict) and item.get("questionId") != target_id
+            ]
+            if target_number is not None:
+                nearby_questions.sort(
+                    key=lambda item: (
+                        abs(int(item.get("number")) - target_number)
+                        if isinstance(item.get("number"), int) and not isinstance(item.get("number"), bool)
+                        else 10_000,
+                        int(item.get("number"))
+                        if isinstance(item.get("number"), int) and not isinstance(item.get("number"), bool)
+                        else 10_000,
+                    )
+                )
+            nearby_questions = nearby_questions[:4]
+            page_number = issue.get("page")
+            if not isinstance(page_number, int) or isinstance(page_number, bool):
+                page_number = question.get("page") if isinstance(question, dict) else None
+            if (not isinstance(page_number, int) or isinstance(page_number, bool)) and nearby_questions:
+                page_number = nearby_questions[0].get("page")
+            manifest = _read_json(_safe_exam_directory(exam_id) / "manifest.json", {})
+            if not isinstance(manifest, dict):
+                manifest = {}
+            page_context = self._agent_page_context(
+                manifest,
+                page_number,
+                question.get("bbox") if isinstance(question, dict) else None,
+            )
+            matching_conflicts = [
+                item
+                for item in conflicts
+                if isinstance(item, dict) and str(item.get("questionId") or "") == target_id
+            ][:20]
+            retrieval_query = " ".join(
+                [target_id, str(issue.get("message") or ""), str((question or {}).get("stem") or "")]
+            )
+            exact, vector = self._retrieve(
+                exam_id,
+                target_id,
+                retrieval_query,
+                snapshot=snapshot,
+            )
+            normalized_issue = {
+                "issueId": issue_id,
+                "kind": str(issue.get("kind") or "unknown"),
+                "targetId": target_id,
+                "message": str(issue.get("message") or ""),
+                "severity": str(issue.get("severity") or "manualReview"),
+                "page": page_number if isinstance(page_number, int) and not isinstance(page_number, bool) else None,
+            }
+            request = {
+                "examId": exam_id,
+                "reviewRevision": revision,
+                "issue": normalized_issue,
+                "context": {
+                    "question": question,
+                    "answer": answer,
+                    "nearbyQuestions": nearby_questions,
+                    "answerConflicts": matching_conflicts,
+                    "page": page_context,
+                    "evidence": {"exact": exact, "vector": vector},
+                    "policy": "suggest_only_human_approval_required",
+                },
+            }
+
+        try:
+            client = AgentClient.from_environment()
+            if not client.configured:
+                raise AgentUnavailable("CET_AGENT_URL is not configured")
+            response = client.suggest_review(request)
+            if (
+                not isinstance(response, dict)
+                or response.get("examId") != exam_id
+                or response.get("reviewRevision") != revision
+                or response.get("issueId") != issue_id
+                or response.get("policy") != "suggest_only"
+            ):
+                raise AgentProtocolError("Agent review response identity does not match the fixed snapshot")
+        except AgentProtocolError as error:
+            raise PlatformError("Agent runtime returned an invalid review suggestion", HTTPStatus.BAD_GATEWAY) from error
+        except (AgentUnavailable, AgentClientError) as error:
+            raise PlatformError("Agent review suggestions are temporarily unavailable", HTTPStatus.SERVICE_UNAVAILABLE) from error
+
+        # A review may be published while the Agent is running.  Never return a
+        # suggestion labelled as current after its fixed snapshot became stale.
+        with self._lock:
+            _, current_revision, _ = self._current_review_snapshot(exam_id)
+            if current_revision != revision:
+                raise PlatformError(
+                    f"review revision changed; current revision is {current_revision}",
+                    HTTPStatus.CONFLICT,
+                )
+        return response
+
     def assistant(self, exam_id: str, payload: dict[str, object]) -> dict[str, object]:
         allowed = {"questionId", "message", "userAnswer", "history", "reviewRevision"}
         if set(payload) - allowed:
@@ -2746,8 +3017,49 @@ class PlatformService:
         official_explanation_found = bool(official and str(official.get("explanation") or "").strip())
         disclaimer = "" if official_explanation_found else "答案资料中没有找到官方解析，以下为 AI 辅助分析。"
         reply = self._grounded_fallback(question_id, question, official, user_answer, disclaimer)
+        agent_response: dict[str, object] | None = None
+        try:
+            agent_client = AgentClient.from_environment()
+            if agent_client.configured:
+                agent_response = agent_client.tutor(
+                    {
+                        "examId": exam_id,
+                        "questionId": question_id,
+                        "reviewRevision": revision,
+                        "message": message.strip(),
+                        "userAnswer": user_answer,
+                        "history": clean_history,
+                        "context": {
+                            "question": question,
+                            "officialAnswer": official,
+                            "evidence": {"exact": exact, "vector": vector},
+                            "officialExplanationFound": official_explanation_found,
+                            "disclaimer": disclaimer,
+                            "policy": "question_id_exact_then_vector_context",
+                        },
+                    }
+                )
+                if (
+                    not isinstance(agent_response, dict)
+                    or agent_response.get("examId") != exam_id
+                    or agent_response.get("questionId") != question_id
+                    or agent_response.get("reviewRevision") != revision
+                ):
+                    raise AgentProtocolError("Agent tutor response identity does not match the fixed snapshot")
+                reply = str(agent_response["reply"])
+                if disclaimer and disclaimer not in reply:
+                    reply = f"{disclaimer}\n\n{reply}"
+        except AgentClientError:
+            # The Agent runtime is optional.  Any configuration, transport, or
+            # response-contract failure preserves the established deterministic
+            # and direct-DeepSeek assistant path.
+            agent_response = None
+
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        if api_key and api_key not in {"YOUR_DEEPSEEK_API_KEY", "PASTE_YOUR_DEEPSEEK_API_KEY_HERE"}:
+        if agent_response is None and api_key and api_key not in {
+            "YOUR_DEEPSEEK_API_KEY",
+            "PASTE_YOUR_DEEPSEEK_API_KEY_HERE",
+        }:
             try:
                 reply = self._deepseek_assistant_reply(
                     api_key,
@@ -2763,7 +3075,7 @@ class PlatformService:
                 )
             except PlatformError as error:
                 reply += f"\n\nAI 服务暂时不可用（{error.message}），以上仅展示已检索到的答案资料。"
-        return {
+        response: dict[str, object] = {
             "examId": exam_id,
             "questionId": question_id,
             "revision": revision,
@@ -2776,6 +3088,19 @@ class PlatformService:
                 "retrievalOrder": ["question_id_exact", "deterministic_vector_supplement"],
             },
         }
+        if agent_response is not None:
+            response["citations"] = agent_response["citations"]
+            response["grounding"]["agent"] = agent_response["grounding"]
+            response["agent"] = {
+                "schemaVersion": agent_response["schemaVersion"],
+                "runId": agent_response["runId"],
+                "threadId": agent_response["threadId"],
+                "status": agent_response["status"],
+                "intent": agent_response["intent"],
+                "tools": agent_response["tools"],
+                "trace": agent_response["trace"],
+            }
+        return response
 
     @staticmethod
     def _grounded_fallback(
@@ -2893,6 +3218,9 @@ class PlatformAPI:
     )
     ASSISTANT_ROUTE = re.compile(r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/assistant$")
     REVIEW_ROUTE = re.compile(r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/review$")
+    REVIEW_SUGGESTION_ROUTE = re.compile(
+        r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/agent/review-suggestions$"
+    )
 
     def __init__(self) -> None:
         self.service = PlatformService()
@@ -2900,6 +3228,19 @@ class PlatformAPI:
     @staticmethod
     def _send_error(handler, error: PlatformError) -> None:
         handler._json_error(error.status, error.message)
+
+    @staticmethod
+    def _request_is_loopback(handler) -> bool:
+        try:
+            address = ipaddress.ip_address(str(handler.client_address[0]))
+        except (AttributeError, IndexError, ValueError):
+            return False
+        host = urlparse(f"//{handler.headers.get('Host', '')}").hostname or ""
+        try:
+            host_is_loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            host_is_loopback = host.lower() == "localhost"
+        return address.is_loopback and host_is_loopback
 
     def handle_get(self, handler, parsed, include_body: bool = True) -> bool:
         path = parsed.path.rstrip("/") or "/"
@@ -3040,6 +3381,21 @@ class PlatformAPI:
                 payload = self._read_json_body(handler)
                 response = self.service.assistant(assistant.group(1), payload)
                 handler._json_response(HTTPStatus.OK, response)
+                return True
+            suggestion = self.REVIEW_SUGGESTION_ROUTE.fullmatch(path)
+            if suggestion:
+                if not self._request_is_loopback(handler):
+                    raise PlatformError(
+                        "Agent review suggestions are restricted to the local machine until authentication is configured",
+                        HTTPStatus.FORBIDDEN,
+                    )
+                payload = self._read_json_body(handler, maximum=16 * 1024)
+                response = self.service.agent_review_suggestion(suggestion.group(1), payload)
+                handler._json_response(
+                    HTTPStatus.OK,
+                    response,
+                    extra_headers={"ETag": _review_etag(int(response["reviewRevision"]))},
+                )
                 return True
             raise PlatformError("API endpoint not found", HTTPStatus.NOT_FOUND)
         except PlatformError as error:

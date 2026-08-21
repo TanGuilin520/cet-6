@@ -1,0 +1,29 @@
+version: "3.3"
+
+services:
+  agent-runtime:
+    build:
+      context: ./services/agent
+    image: cet-agent-runtime:local
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:8770:8770"
+    environment:
+      CET_AGENT_TOKEN: "${CET_AGENT_TOKEN-local-only-change-me}"
+      CET_AGENT_CHECKPOINT_PATH: /data/agent-checkpoints.sqlite3
+      CET_AGENT_CHECKPOINT_MAX_THREADS: "${CET_AGENT_CHECKPOINT_MAX_THREADS-50}"
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY-PASTE_YOUR_DEEPSEEK_API_KEY_HERE}"
+      CET_AGENT_DEEPSEEK_MODEL: "${CET_AGENT_DEEPSEEK_MODEL-deepseek-chat}"
+      CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS: "${CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS-25}"
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    volumes:
+      - agent-checkpoints:/data
+
+volumes:
+  agent-checkpoints:

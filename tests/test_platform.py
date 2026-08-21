@@ -561,6 +561,45 @@ class ReviewFrontendRegressionTests(unittest.TestCase):
         self.assertNotRegex(html, r'id="question-stem"[^>]*\brequired\b')
         self.assertIn("if (!stem && LONG_TYPES.has(type))", source)
 
+    def test_agent_suggestion_is_preview_only_and_revision_pinned(self) -> None:
+        html = (PROJECT_ROOT / "public/review.html").read_text(encoding="utf-8")
+        source = (PROJECT_ROOT / "public/js/review.js").read_text(encoding="utf-8")
+        self.assertIn('id="request-agent-suggestion"', html)
+        self.assertIn('id="apply-agent-suggestion"', html)
+        self.assertIn("/agent/review-suggestions", source)
+        self.assertIn("reviewRevision: requestRevision", source)
+        self.assertIn("document.policy !== 'suggest_only'", source)
+        self.assertIn("document.reviewRevision !== state.revision", source)
+        self.assertIn("document.proposals", source)
+
+        request_start = source.index("async function requestAgentSuggestion()")
+        request_end = source.index("function applyAgentSuggestion()", request_start)
+        request_handler = source[request_start:request_end]
+        self.assertIn("method: 'POST'", request_handler)
+        self.assertNotIn("method: 'PATCH'", request_handler)
+        self.assertNotIn("patchReview(", request_handler)
+
+        apply_start = request_end
+        apply_end = source.index("function appendOptionRow(", apply_start)
+        apply_handler = source[apply_start:apply_end]
+        self.assertIn("setDirty(true)", apply_handler)
+        self.assertNotIn("fetch(", apply_handler)
+        self.assertNotIn("patchReview(", apply_handler)
+
+    def test_agent_proposals_use_field_allowlist_and_safe_dom(self) -> None:
+        source = (PROJECT_ROOT / "public/js/review.js").read_text(encoding="utf-8")
+        self.assertIn("const AGENT_PROPOSAL_FIELDS", source)
+        self.assertIn("['stem', 'type', 'page', 'bbox', 'options']", source)
+        self.assertIn("['answer', 'explanation']", source)
+        normalize_start = source.index("function normalizeAgentSuggestion(")
+        normalize_end = source.index("function appendSuggestionBlock(", normalize_start)
+        normalize_handler = source[normalize_start:normalize_end]
+        self.assertIn("proposalQuestionId !== questionId", normalize_handler)
+        self.assertIn("proposalKeys.has(key)", normalize_handler)
+        render_start = source.index("function renderAgentSuggestion(")
+        render_end = source.index("async function requestAgentSuggestion()", render_start)
+        self.assertNotIn("innerHTML", source[render_start:render_end])
+
 
 class UploadFrontendRegressionTests(unittest.TestCase):
     def test_form_data_is_captured_before_inputs_are_disabled(self) -> None:
@@ -666,6 +705,17 @@ class ReaderFrontendRegressionTests(unittest.TestCase):
         self.assertIn("aiHistoryRevision", self.javascript)
         self.assertIn("state.aiHistory = {}", self.javascript)
         self.assertIn("requestRevision !== questionDataRevision", self.javascript)
+
+    def test_reader_preserves_agent_citations_and_safe_trace_summary(self) -> None:
+        self.assertIn("function normalizeAiCitation(", self.javascript)
+        self.assertIn("item.excerpt", self.javascript)
+        self.assertIn("function normalizeAiAgent(", self.javascript)
+        self.assertIn("appendAssistantMetadata", self.javascript)
+        self.assertIn("data?.citations", self.javascript)
+        self.assertIn("data?.agent", self.javascript)
+        metadata_start = self.javascript.index("function appendAssistantMetadata(")
+        metadata_end = self.javascript.index("function renderAiQuestionMessages(", metadata_start)
+        self.assertNotIn("innerHTML", self.javascript[metadata_start:metadata_end])
 
     def test_writing_templates_parse_placeholders_and_use_safe_dom_rendering(self) -> None:
         self.assertIn("writingTemplates", self.javascript)

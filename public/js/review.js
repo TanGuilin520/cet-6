@@ -32,6 +32,11 @@
   const questionType = $('#question-type');
   const removeAnswerWithSave = $('#remove-answer-with-save');
   const answerRemovalControl = $('#answer-removal-control');
+  const requestAgentSuggestionButton = $('#request-agent-suggestion');
+  const agentSuggestionStatus = $('#agent-suggestion-status');
+  const agentSuggestionPreview = $('#agent-suggestion-preview');
+  const agentSuggestionContent = $('#agent-suggestion-content');
+  const applyAgentSuggestionButton = $('#apply-agent-suggestion');
 
   const params = new URLSearchParams(location.search);
   const requestedExamId = String(params.get('exam') || '').trim();
@@ -61,8 +66,16 @@
     questionFormBaseline: '',
     answerFormBaseline: '',
     busyAction: '',
+    agentSuggestionUrl: '',
+    agentSuggestion: null,
+    agentSuggestionKey: '',
+    agentSuggestionIssueId: '',
+    agentSuggestionBusy: false,
+    agentSuggestionApplied: false,
+    agentSuggestionRequestId: 0,
   };
   state.reviewUrl = state.examId ? `/api/exams/${state.examId}/review` : '';
+  state.agentSuggestionUrl = state.examId ? `/api/exams/${state.examId}/agent/review-suggestions` : '';
 
   function text(value, maximum = 12000) {
     return String(value ?? '').trim().slice(0, maximum);
@@ -136,6 +149,7 @@
     if (retry) retry.disabled = state.busy;
     if (removeQuestion) removeQuestion.disabled = state.busy || state.conflicted || !state.activeItem?.question || state.activeIsNew;
     if (removeAnswer) removeAnswer.disabled = state.busy || state.conflicted || !state.activeItem?.answer || state.activeIsNew;
+    syncAgentSuggestionAvailability();
   }
 
   function confirmDiscard() {
@@ -355,6 +369,466 @@
     issueSummary.append(list);
   }
 
+  function activeSuggestionIssue() {
+    if (!state.activeItem || state.activeIsNew) return null;
+    return state.activeItem.issues.find((issue) => issue?.issueId) || null;
+  }
+
+  function syncAgentSuggestionAvailability() {
+    if (!requestAgentSuggestionButton) return;
+    const issue = activeSuggestionIssue();
+    requestAgentSuggestionButton.disabled = Boolean(
+      state.busy || state.conflicted || state.agentSuggestionBusy || !issue
+    );
+    requestAgentSuggestionButton.textContent = state.agentSuggestionBusy ? '分析中…' : '获取建议';
+    if (applyAgentSuggestionButton) {
+      applyAgentSuggestionButton.disabled = Boolean(
+        state.busy || state.conflicted || state.agentSuggestionBusy
+        || !state.agentSuggestion || !state.agentSuggestion.proposals.length || state.agentSuggestionApplied
+      );
+      applyAgentSuggestionButton.textContent = state.agentSuggestionApplied
+        ? '已应用到表单'
+        : '应用到表单（不会保存）';
+    }
+  }
+
+  function clearAgentSuggestion(message = '', error = false) {
+    state.agentSuggestionRequestId += 1;
+    state.agentSuggestionBusy = false;
+    state.agentSuggestion = null;
+    state.agentSuggestionKey = '';
+    state.agentSuggestionIssueId = '';
+    state.agentSuggestionApplied = false;
+    if (agentSuggestionContent) agentSuggestionContent.replaceChildren();
+    if (agentSuggestionPreview) agentSuggestionPreview.hidden = true;
+    if (agentSuggestionStatus) {
+      const issue = activeSuggestionIssue();
+      agentSuggestionStatus.textContent = message || (issue
+        ? `将针对“${issue.message}”生成候选修改；结果仍需人工核对。`
+        : '当前项目没有可交给 Agent 的待处理问题，请继续人工复核。');
+      agentSuggestionStatus.classList.toggle('is-error', Boolean(error));
+    }
+    syncAgentSuggestionAvailability();
+  }
+
+  function normalizeSuggestionEvidence(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const pageValue = Number(raw.page);
+    const bbox = raw.bbox && typeof raw.bbox === 'object' ? {
+      x: number(raw.bbox.x),
+      y: number(raw.bbox.y),
+      width: number(raw.bbox.width),
+      height: number(raw.bbox.height),
+    } : null;
+    return {
+      source: text(raw.source ?? raw.kind, 80),
+      label: text(raw.label ?? raw.title, 160),
+      page: Number.isInteger(pageValue) && pageValue > 0 ? pageValue : null,
+      quote: text(raw.quote ?? raw.excerpt ?? raw.content ?? raw.text, 1200),
+      bbox: bbox && bbox.width > 0 && bbox.height > 0 ? bbox : null,
+    };
+  }
+
+  function normalizeSuggestionTrace(raw, document) {
+    const source = raw && typeof raw === 'object' ? raw : {};
+    const nodes = Array.isArray(source.nodes)
+      ? source.nodes.map((node) => text(node, 100)).filter(Boolean).slice(0, 30)
+      : [];
+    const toolsSource = Array.isArray(document?.tools) ? document.tools : [];
+    const tools = toolsSource.map((tool) => {
+      if (typeof tool === 'string') return { name: text(tool, 100), status: '', summary: '' };
+      if (!tool || typeof tool !== 'object') return null;
+      return {
+        name: text(tool.name, 100),
+        status: text(tool.status, 40),
+        summary: text(tool.summary, 240),
+      };
+    }).filter((tool) => tool?.name).slice(0, 30);
+    const duration = Number(source.durationMs);
+    return {
+      runId: text(document?.runId ?? source.runId, 160),
+      nodes,
+      tools,
+      durationMs: Number.isFinite(duration) && duration >= 0 ? Math.round(duration) : null,
+    };
+  }
+
+  const AGENT_PROPOSAL_FIELDS = Object.freeze({
+    question: new Set(['stem', 'type', 'page', 'bbox', 'options']),
+    answer: new Set(['answer', 'explanation']),
+  });
+
+  function normalizeProposalValue(entity, field, value) {
+    if (field === 'stem') {
+      if (typeof value !== 'string') throw new Error('AI 建议中的题干格式无效。');
+      const stem = text(value, 12000);
+      if (!stem) throw new Error('AI 建议中的题干不能为空。');
+      return stem;
+    }
+    if (field === 'type') {
+      if (typeof value !== 'string' || !QUESTION_TYPES.has(value)) throw new Error('AI 建议中的题型无效。');
+      return value;
+    }
+    if (field === 'page') {
+      if (!Number.isInteger(value) || !pageDimensions(value)) throw new Error('AI 建议中的页码无效。');
+      return value;
+    }
+    if (field === 'bbox') {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('AI 建议中的坐标格式无效。');
+      if (['x', 'y', 'width', 'height'].some((name) => typeof value[name] !== 'number')) {
+        throw new Error('AI 建议中的坐标必须使用数字。');
+      }
+      const bbox = {
+        x: Number(value.x), y: Number(value.y), width: Number(value.width), height: Number(value.height),
+      };
+      if (!Object.values(bbox).every(Number.isFinite)
+        || bbox.x < 0 || bbox.y < 0 || bbox.width <= 0 || bbox.height <= 0) {
+        throw new Error('AI 建议中的坐标无效。');
+      }
+      return bbox;
+    }
+    if (field === 'options') {
+      if (!Array.isArray(value) || !value.length || value.length > 15) throw new Error('AI 建议中的选项格式无效。');
+      if (value.some((option) => !option || typeof option !== 'object' || Array.isArray(option)
+        || Object.keys(option).length !== 2 || !Object.prototype.hasOwnProperty.call(option, 'label')
+        || !Object.prototype.hasOwnProperty.call(option, 'text')
+        || typeof option.label !== 'string' || typeof option.text !== 'string')) {
+        throw new Error('AI 建议中的选项必须只包含 label 和 text。');
+      }
+      const options = normalizeOptions(value);
+      if (options.length !== value.length || options.some((option) => !option.text)) {
+        throw new Error('AI 建议中的选项标签重复、内容为空或超出 A–O。');
+      }
+      return options;
+    }
+    if (entity === 'answer' && field === 'answer') {
+      if (typeof value !== 'string' || !/^[A-O]$/.test(value.trim().toUpperCase())) {
+        throw new Error('AI 建议中的正确答案无效。');
+      }
+      return value.trim().toUpperCase();
+    }
+    if (entity === 'answer' && field === 'explanation') {
+      if (typeof value !== 'string') throw new Error('AI 建议中的官方解析格式无效。');
+      return text(value, 12000);
+    }
+    throw new Error('AI 建议包含未授权字段，已拒绝应用。');
+  }
+
+  function validateProposalCombination(proposals, issue, questionId) {
+    const baseQuestion = state.activeItem?.question || defaultQuestion(questionId, issue);
+    const candidateQuestion = {
+      ...baseQuestion,
+      bbox: { ...baseQuestion.bbox },
+      options: baseQuestion.options.map((option) => ({ ...option })),
+    };
+    let candidateAnswer = state.activeItem?.answer?.answer || '';
+    proposals.forEach((proposal) => {
+      if (proposal.entity === 'question') candidateQuestion[proposal.field] = proposal.value;
+      else if (proposal.field === 'answer') candidateAnswer = proposal.value;
+    });
+    const positionChanged = proposals.some((proposal) => proposal.entity === 'question' && ['page', 'bbox'].includes(proposal.field));
+    if (positionChanged) {
+      const dimensions = pageDimensions(candidateQuestion.page);
+      const box = candidateQuestion.bbox;
+      if (!dimensions || !box || box.width <= 0 || box.height <= 0
+        || box.x + box.width > dimensions.width + .5
+        || box.y + box.height > dimensions.height + .5) {
+        throw new Error('AI 建议组合后的页码或坐标超出原卷范围。');
+      }
+    }
+    const structureChanged = proposals.some((proposal) => proposal.entity === 'question' && ['type', 'options'].includes(proposal.field));
+    if (structureChanged && ['single_choice', 'matching'].includes(candidateQuestion.type) && candidateQuestion.options.length < 2) {
+      throw new Error('AI 建议组合后的客观题选项不完整。');
+    }
+    if (structureChanged && LONG_TYPES.has(candidateQuestion.type) && candidateQuestion.options.length) {
+      throw new Error('AI 建议组合后的主观题仍包含客观选项。');
+    }
+    if (structureChanged && candidateQuestion.type === 'unknown' && candidateQuestion.options.length === 1) {
+      throw new Error('AI 建议组合后的待确认题型不能只包含一个选项。');
+    }
+    const answerChanged = proposals.some((proposal) => proposal.entity === 'answer' && proposal.field === 'answer');
+    if (answerChanged && (!['single_choice', 'matching'].includes(candidateQuestion.type)
+      || !candidateQuestion.options.some((option) => option.label === candidateAnswer))) {
+      throw new Error('AI 建议答案与当前或候选选项不一致。');
+    }
+  }
+
+  function normalizeAgentSuggestion(document, issue, questionId) {
+    if (!document || typeof document !== 'object'
+      || document.schemaVersion !== 'cet-agent-review-suggestion/1'
+      || document.policy !== 'suggest_only'
+      || document.status !== 'completed'
+      || document.examId !== state.examId) {
+      throw new Error('服务器返回了不兼容的 AI 建议。');
+    }
+    if (!Number.isInteger(document.reviewRevision) || document.reviewRevision !== state.revision) {
+      throw new Error('AI 建议基于其他复核版本，请重新读取后再生成。');
+    }
+    const responseIssueId = text(document.issueId, 160);
+    if (responseIssueId !== issue.issueId) {
+      throw new Error('AI 建议与当前待处理问题不匹配。');
+    }
+    if (!Array.isArray(document.proposals) || document.proposals.length > 10) {
+      throw new Error('AI 建议提供了数量异常的候选修改。');
+    }
+    const proposals = [];
+    const proposalKeys = new Set();
+    document.proposals.forEach((proposal) => {
+      const expectedFields = new Set(['op', 'entity', 'questionId', 'field', 'value', 'confidence', 'evidenceSources']);
+      if (!proposal || typeof proposal !== 'object' || Array.isArray(proposal)
+        || Object.keys(proposal).length !== expectedFields.size
+        || Object.keys(proposal).some((fieldName) => !expectedFields.has(fieldName))
+        || !Array.isArray(proposal.evidenceSources)) {
+        throw new Error('AI 建议字段不符合约定格式，已拒绝应用。');
+      }
+      const entity = text(proposal?.entity, 20);
+      const field = text(proposal?.field, 40);
+      const proposalQuestionId = text(proposal?.questionId, 32);
+      const confidence = Number(proposal?.confidence);
+      const key = `${entity}:${field}`;
+      if (proposal?.op !== 'replace'
+        || !Object.prototype.hasOwnProperty.call(AGENT_PROPOSAL_FIELDS, entity)
+        || !AGENT_PROPOSAL_FIELDS[entity].has(field)
+        || proposalQuestionId !== questionId
+        || proposalKeys.has(key)
+        || typeof proposal?.confidence !== 'number'
+        || !Number.isFinite(confidence) || confidence < 0 || confidence > 1) {
+        throw new Error('AI 建议包含不允许的修改操作，已拒绝应用。');
+      }
+      proposalKeys.add(key);
+      const evidenceSources = proposal.evidenceSources.map((source) => text(source, 160)).filter(Boolean).slice(0, 32);
+      if (evidenceSources.length !== proposal.evidenceSources.length || proposal.evidenceSources.length > 32) {
+        throw new Error('AI 建议中的证据来源格式无效。');
+      }
+      proposals.push({
+        op: 'replace', entity, questionId, field,
+        value: normalizeProposalValue(entity, field, proposal.value),
+        confidence,
+        evidenceSources,
+      });
+    });
+    validateProposalCombination(proposals, issue, questionId);
+    const rationale = text(document.rationale, 4000);
+    if (!rationale) throw new Error('AI 建议缺少可供人工核对的说明。');
+    return {
+      schemaVersion: document.schemaVersion,
+      policy: document.policy,
+      reviewRevision: document.reviewRevision,
+      issueId: issue.issueId,
+      proposals,
+      rationale,
+      evidence: (Array.isArray(document.evidence) ? document.evidence : [])
+        .map(normalizeSuggestionEvidence).filter(Boolean).slice(0, 12),
+      cautions: (Array.isArray(document.cautions) ? document.cautions : [])
+        .map((caution) => text(caution, 500)).filter(Boolean).slice(0, 10),
+      trace: normalizeSuggestionTrace(document.trace, document),
+    };
+  }
+
+  function appendSuggestionBlock(title, values) {
+    if (!agentSuggestionContent || !values.length) return;
+    const section = makeElement('section', 'agent-suggestion-block');
+    section.append(makeElement('h3', '', title));
+    if (values.length === 1) {
+      section.append(makeElement('p', '', values[0]));
+    } else {
+      const list = document.createElement('ul');
+      values.forEach((value) => list.append(makeElement('li', '', value)));
+      section.append(list);
+    }
+    agentSuggestionContent.append(section);
+  }
+
+  function appendProposalField(list, label, value) {
+    list.append(makeElement('dt', '', label), makeElement('dd', '', value));
+  }
+
+  function proposalFieldLabel(entity, field) {
+    return ({
+      'question:stem': '题干',
+      'question:type': '题型',
+      'question:page': '页码',
+      'question:bbox': '原卷坐标',
+      'question:options': '选项',
+      'answer:answer': '正确答案',
+      'answer:explanation': '官方解析',
+    })[`${entity}:${field}`] || field;
+  }
+
+  function proposalValueText(proposal) {
+    if (proposal.field === 'type') return typeLabel(proposal.value);
+    if (proposal.field === 'page') return `第 ${proposal.value} 页`;
+    if (proposal.field === 'bbox') {
+      const box = proposal.value;
+      return `${box.x}, ${box.y}, ${box.width} × ${box.height}`;
+    }
+    if (proposal.field === 'options') {
+      return proposal.value.length
+        ? proposal.value.map((option) => `${option.label}. ${option.text}`).join('\n')
+        : '无';
+    }
+    return proposal.value || '（空）';
+  }
+
+  function renderSuggestionProposal(proposal) {
+    const container = makeElement('div', 'agent-suggestion-operation');
+    const fields = document.createElement('dl');
+    const entityLabel = proposal.entity === 'question' ? '题目字段' : '答案字段';
+    container.append(makeElement('strong', '', `${entityLabel} · ${proposalFieldLabel(proposal.entity, proposal.field)}`));
+    appendProposalField(fields, '候选值', proposalValueText(proposal));
+    appendProposalField(fields, '置信度', `${Math.round(proposal.confidence * 100)}%`);
+    if (proposal.evidenceSources.length) appendProposalField(fields, '证据引用', proposal.evidenceSources.join('、'));
+    container.append(fields);
+    return container;
+  }
+
+  function renderAgentSuggestion(suggestion) {
+    if (!agentSuggestionContent || !agentSuggestionPreview || !agentSuggestionStatus) return;
+    agentSuggestionContent.replaceChildren();
+    appendSuggestionBlock('建议说明', [suggestion.rationale]);
+    if (suggestion.proposals.length) {
+      const proposalsSection = makeElement('section', 'agent-suggestion-block');
+      proposalsSection.append(makeElement('h3', '', '候选字段修改'));
+      suggestion.proposals.forEach((proposal) => proposalsSection.append(renderSuggestionProposal(proposal)));
+      agentSuggestionContent.append(proposalsSection);
+    }
+    const evidence = suggestion.evidence.map((item) => {
+      const location = item.page ? `第 ${item.page} 页` : '';
+      const label = item.label || item.source || '资料证据';
+      const quote = item.quote ? `：${item.quote}` : '';
+      return [label, location].filter(Boolean).join(' · ') + quote;
+    });
+    appendSuggestionBlock('证据', evidence);
+    appendSuggestionBlock('注意事项', suggestion.cautions);
+    const traceItems = [
+      ...suggestion.trace.nodes.map((node) => `节点：${node}`),
+      ...suggestion.trace.tools.map((tool) => `工具：${tool.name}${tool.status ? `（${tool.status}）` : ''}${tool.summary ? ` — ${tool.summary}` : ''}`),
+    ];
+    if (traceItems.length || suggestion.trace.runId || suggestion.trace.durationMs !== null) {
+      const details = makeElement('details', 'agent-suggestion-trace');
+      const traceLabel = [
+        'Agent 运行记录',
+        suggestion.trace.durationMs !== null ? `${suggestion.trace.durationMs} ms` : '',
+      ].filter(Boolean).join(' · ');
+      details.append(makeElement('summary', '', traceLabel));
+      const list = document.createElement('ul');
+      if (suggestion.trace.runId) list.append(makeElement('li', '', `Run ID：${suggestion.trace.runId}`));
+      traceItems.forEach((item) => list.append(makeElement('li', '', item)));
+      details.append(list);
+      agentSuggestionContent.append(details);
+    }
+    agentSuggestionStatus.classList.remove('is-error');
+    agentSuggestionStatus.textContent = suggestion.proposals.length
+      ? '建议已生成。请先核对原卷与证据，再明确应用到表单。'
+      : 'Agent 没有在证据不足时猜测字段；请查看说明并继续人工复核。';
+    agentSuggestionPreview.hidden = false;
+    syncAgentSuggestionAvailability();
+  }
+
+  async function requestAgentSuggestion() {
+    const issue = activeSuggestionIssue();
+    if (!issue || state.busy || state.conflicted || state.agentSuggestionBusy) return;
+    const requestKey = state.activeKey;
+    const requestRevision = state.revision;
+    const requestId = state.agentSuggestionRequestId + 1;
+    state.agentSuggestionRequestId = requestId;
+    state.agentSuggestionBusy = true;
+    state.agentSuggestion = null;
+    state.agentSuggestionApplied = false;
+    if (agentSuggestionPreview) agentSuggestionPreview.hidden = true;
+    if (agentSuggestionContent) agentSuggestionContent.replaceChildren();
+    if (agentSuggestionStatus) {
+      agentSuggestionStatus.classList.remove('is-error');
+      agentSuggestionStatus.textContent = 'Agent 正在读取当前问题与原卷证据…';
+    }
+    syncAgentSuggestionAvailability();
+    try {
+      const response = await fetch(state.agentSuggestionUrl, {
+        method: 'POST',
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ issueId: issue.issueId, reviewRevision: requestRevision }),
+      });
+      if (!response.ok) throw new Error(await responseMessage(response));
+      const responseEtag = text(response.headers.get('ETag'), 100);
+      if (responseEtag && responseEtag !== state.etag) {
+        throw new Error('AI 建议返回了不同的复核 ETag，请重新读取后再生成。');
+      }
+      const document = await response.json();
+      if (requestId !== state.agentSuggestionRequestId) return;
+      if (requestKey !== state.activeKey || requestRevision !== state.revision) {
+        throw new Error('复核项目或版本已经变化，请重新生成 AI 建议。');
+      }
+      const suggestion = normalizeAgentSuggestion(document, issue, state.activeItem.questionId);
+      state.agentSuggestion = suggestion;
+      state.agentSuggestionKey = requestKey;
+      state.agentSuggestionIssueId = issue.issueId;
+      renderAgentSuggestion(suggestion);
+    } catch (error) {
+      if (requestId !== state.agentSuggestionRequestId) return;
+      state.agentSuggestion = null;
+      if (agentSuggestionPreview) agentSuggestionPreview.hidden = true;
+      if (agentSuggestionStatus) {
+        agentSuggestionStatus.classList.add('is-error');
+        agentSuggestionStatus.textContent = error?.message || 'AI 建议暂时不可用，请继续人工复核。';
+      }
+    } finally {
+      if (requestId === state.agentSuggestionRequestId) {
+        state.agentSuggestionBusy = false;
+        syncAgentSuggestionAvailability();
+      }
+    }
+  }
+
+  function applyAgentSuggestion() {
+    const suggestion = state.agentSuggestion;
+    const issue = activeSuggestionIssue();
+    if (!suggestion || !suggestion.proposals.length || !issue || state.busy || state.conflicted) return;
+    if (state.agentSuggestionKey !== state.activeKey
+      || state.agentSuggestionIssueId !== issue.issueId
+      || suggestion.reviewRevision !== state.revision) {
+      clearAgentSuggestion('AI 建议与当前题目或版本不一致，请重新生成。', true);
+      return;
+    }
+    if (hasSubstantiveFormChanges()
+      && !window.confirm('当前表单已有未保存修改。应用 AI 建议可能覆盖相同字段，确定继续吗？')) return;
+    state.populating = true;
+    suggestion.proposals.forEach((proposal) => {
+      if (proposal.entity === 'question' && proposal.field === 'stem') $('#question-stem').value = proposal.value;
+      else if (proposal.entity === 'question' && proposal.field === 'type') {
+        questionType.value = proposal.value;
+        questionType.dataset.previousValue = proposal.value;
+      } else if (proposal.entity === 'question' && proposal.field === 'page') {
+        $('#question-page').value = String(proposal.value);
+      } else if (proposal.entity === 'question' && proposal.field === 'bbox') {
+        $('#bbox-x').value = String(proposal.value.x);
+        $('#bbox-y').value = String(proposal.value.y);
+        $('#bbox-width').value = String(proposal.value.width);
+        $('#bbox-height').value = String(proposal.value.height);
+      } else if (proposal.entity === 'question' && proposal.field === 'options') {
+        renderOptions(proposal.value);
+      } else if (proposal.entity === 'answer' && proposal.field === 'answer') {
+        $('#answer-value').value = proposal.value;
+      } else if (proposal.entity === 'answer' && proposal.field === 'explanation') {
+        $('#answer-explanation').value = proposal.value;
+      }
+    });
+    if (suggestion.proposals.some((proposal) => proposal.entity === 'answer')) {
+      removeAnswerWithSave.checked = false;
+      setAnswerRemovalMode(false);
+    }
+    state.populating = false;
+    setFormError('');
+    const proposedPage = Number($('#question-page').value);
+    if (pageDimensions(proposedPage)) setPreviewPage(proposedPage);
+    updateBBoxOverlay();
+    setDirty(true);
+    state.agentSuggestionApplied = true;
+    agentSuggestionStatus.classList.remove('is-error');
+    agentSuggestionStatus.textContent = '建议已写入表单但尚未保存。请逐项核对，并填写具体修改理由后再保存复核。';
+    syncAgentSuggestionAvailability();
+    showToast('AI 建议已应用到表单，尚未保存');
+  }
+
   function appendOptionRow(option = { label: '', text: '' }) {
     const row = makeElement('div', 'option-row');
     row.dataset.optionRow = '';
@@ -409,6 +883,7 @@
     state.activeKey = item.key;
     state.activeIsNew = isNew;
     state.activeItem = item;
+    clearAgentSuggestion();
     setFormError('');
     editorEmpty.hidden = true;
     form.hidden = false;
@@ -1010,6 +1485,11 @@
   });
   $('#add-option')?.addEventListener('click', addNextOption);
   $('#add-question')?.addEventListener('click', beginNewQuestion);
+  requestAgentSuggestionButton?.addEventListener('click', requestAgentSuggestion);
+  applyAgentSuggestionButton?.addEventListener('click', applyAgentSuggestion);
+  $('#discard-agent-suggestion')?.addEventListener('click', () => {
+    clearAgentSuggestion('已忽略本次建议；表单内容没有因此改变。');
+  });
   $('#reset-form')?.addEventListener('click', () => {
     if (!confirmDiscard()) return;
     const item = state.items.find((candidate) => candidate.key === state.activeKey);

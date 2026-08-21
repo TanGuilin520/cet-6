@@ -393,6 +393,11 @@ svg { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-wi
 .ai-question-message { max-width: 88%; padding: 9px 10px; color: #4a6575; border: 1px solid #d8e4e8; border-radius: 10px 10px 10px 3px; background: #fff; font-size: 9px; line-height: 1.6; white-space: pre-wrap; }
 .ai-question-message--user { margin-left: auto; color: #fff; border-color: #327fa3; border-radius: 10px 10px 3px 10px; background: #327fa3; }
 .ai-question-message.is-pending { color: #7e919b; font-style: italic; }
+.ai-question-message details { margin-top: 8px; padding-top: 7px; border-top: 1px solid #e2eaed; white-space: normal; }
+.ai-question-message details + details { margin-top: 6px; }
+.ai-question-message summary { color: #357b99; cursor: pointer; font-weight: 800; }
+.ai-question-message details ul { margin: 6px 0 0; padding-left: 17px; color: #667d89; }
+.ai-question-message details li + li { margin-top: 3px; }
 .ai-question-form { padding: 12px 14px max(14px, env(safe-area-inset-bottom)); display: grid; gap: 7px; border-top: 1px solid #d5e2e6; background: #fff; }
 .ai-question-form label { color: #607988; font-size: 8px; font-weight: 800; }
 .ai-question-form textarea { width: 100%; min-height: 70px; padding: 9px; resize: vertical; color: #435e6e; border: 1px solid #cbdce3; border-radius: 7px; outline: 0; font-size: 9px; line-height: 1.5; }

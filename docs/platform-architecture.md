@@ -159,6 +159,10 @@ DeepSeek（配置密钥时）或本地保守回答
 
 桌面端 AI 使用无 backdrop 的固定悬浮窗，可在继续答题时保持打开或最小化；移动端改为带遮罩的全屏面板。切题时保存并恢复对应问题草稿，发送请求前固定捕获 `aiPanelQuestionId`，pending 和响应也按原题号回写，避免慢请求串入另一题。后端契约是在原 `{questionId,message,userAnswer?,history}` 上增加可选 `reviewRevision`；旧客户端仍可请求，新 Reader 用它阻止跨修订解释。当前 `userAnswer` 仍只附带前 100 个字符，因此本阶段不宣称 AI 能读取整篇作文。
 
+可选的 Python 3.11 LangGraph sidecar 在这条确定性检索之后工作。主服务先锁定 `reviewRevision`，再把经过边界校验的当前题、答案和证据 context 交给只读 Agent 图；Agent 不能自行读取上传目录，也没有复核写入工具。成功时原响应增加 `citations` 与安全运行摘要，Reader 折叠显示资料依据、工具状态和节点名；协议错误或 sidecar 不可用时回退到上述既有路径。
+
+复核 Agent 使用独立的 `suggest_only` schema，只返回当前 issue 的字段级 `proposals`。Review 页面不会把它当作 PATCH：候选字段必须再次通过题号、revision、字段白名单和结构校验，并由用户明确应用到表单；真正发布仍使用原 ETag、修改理由和不可变 revision 流程。完整图、启动配置与契约见 [Agent 架构说明](agent-architecture.md)。
+
 ## 7. 听力
 
 上传音频保存在试卷私有运行目录，通过同源 API 流式读取。接口支持 HTTP `Range`，所以浏览器可以拖动进度条而不必先下载完整音频。阅读器使用原生音频控件提供播放、暂停、进度与音量，并增加 0.75×–2.0× 倍速。

@@ -6,6 +6,7 @@
 # Python runtime files
 __pycache__/
 *.py[cod]
+.venv-agent/
 
 # Dynamically generated pronunciation audio
 public/assets/audio/cache/
@@ -16,6 +17,9 @@ data/reference/*
 
 # Uploaded exams, generated pages, indexes, and job state
 data/exams/
+
+# Local LangGraph checkpoints and run state
+data/agent/
 
 # Local/editor clutter
 .DS_Store

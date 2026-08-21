@@ -125,13 +125,71 @@
     return Object.fromEntries(Object.entries(value).slice(0, 300).map(([key, answer]) => [String(key), String(answer || '').slice(0, 12000)]));
   }
 
+  function normalizeAiCitation(item) {
+    if (!item || typeof item !== 'object') return null;
+    const pageValue = Number(item.page);
+    const citation = {
+      source: String(item.source ?? item.kind ?? '').trim().slice(0, 80),
+      label: String(item.label ?? item.title ?? '').trim().slice(0, 160),
+      page: Number.isInteger(pageValue) && pageValue > 0 ? pageValue : null,
+      questionId: String(item.questionId ?? '').trim().slice(0, 40),
+      quote: String(item.quote ?? item.excerpt ?? item.content ?? item.text ?? '').trim().slice(0, 360),
+    };
+    return citation.source || citation.label || citation.page || citation.questionId || citation.quote ? citation : null;
+  }
+
+  function normalizeAiCitations(value) {
+    return (Array.isArray(value) ? value : []).map(normalizeAiCitation).filter(Boolean).slice(0, 6);
+  }
+
+  function normalizeAiAgent(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const rawTools = Array.isArray(value.tools) ? value.tools : [];
+    const tools = rawTools.map((tool) => {
+      if (typeof tool === 'string') return { name: tool.trim().slice(0, 80), status: '', summary: '' };
+      if (!tool || typeof tool !== 'object') return null;
+      return {
+        name: String(tool.name || '').trim().slice(0, 80),
+        status: String(tool.status || '').trim().slice(0, 40),
+        summary: String(tool.summary || '').trim().slice(0, 160),
+      };
+    }).filter((tool) => tool?.name).slice(0, 12);
+    const rawTrace = value.trace && typeof value.trace === 'object' && !Array.isArray(value.trace) ? value.trace : {};
+    const rawNodes = Array.isArray(rawTrace.nodes)
+      ? rawTrace.nodes
+      : Array.isArray(value.trace) ? value.trace : [];
+    const nodes = rawNodes.map((node) => String(node || '').trim().slice(0, 80)).filter(Boolean).slice(0, 16);
+    const durationValue = Number(rawTrace.durationMs);
+    const agent = {
+      runId: String(value.runId ?? rawTrace.runId ?? '').trim().slice(0, 160),
+      intent: String(value.intent || '').trim().slice(0, 160),
+      tools,
+      trace: {
+        nodes,
+        durationMs: Number.isFinite(durationValue) && durationValue >= 0 ? Math.round(durationValue) : null,
+      },
+    };
+    return agent.runId || agent.intent || agent.tools.length || agent.trace.nodes.length || agent.trace.durationMs !== null
+      ? agent
+      : null;
+  }
+
   function normalizeStoredHistory(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
     const entries = Object.entries(value).slice(-40).map(([questionId, messages]) => {
-      const cleanMessages = Array.isArray(messages) ? messages.slice(-12).map((message) => ({
-        role: message?.role === 'assistant' ? 'assistant' : 'user',
-        content: String(message?.content || '').slice(0, 2500),
-      })).filter((message) => message.content) : [];
+      const cleanMessages = Array.isArray(messages) ? messages.slice(-12).map((message) => {
+        const clean = {
+          role: message?.role === 'assistant' ? 'assistant' : 'user',
+          content: String(message?.content || '').slice(0, 2500),
+        };
+        if (clean.role === 'assistant') {
+          const citations = normalizeAiCitations(message?.citations);
+          const agent = normalizeAiAgent(message?.agent);
+          if (citations.length) clean.citations = citations;
+          if (agent) clean.agent = agent;
+        }
+        return clean;
+      }).filter((message) => message.content) : [];
       return [String(questionId), cleanMessages];
     });
     return Object.fromEntries(entries);
@@ -1415,6 +1473,44 @@
     }
   }
 
+  function assistantCitationText(citation) {
+    const heading = [
+      citation.label || citation.source || '资料证据',
+      citation.questionId,
+      citation.page ? `第 ${citation.page} 页` : '',
+    ].filter(Boolean).join(' · ');
+    return citation.quote ? `${heading}：${citation.quote}` : heading;
+  }
+
+  function appendAssistantMetadata(container, message) {
+    const citations = normalizeAiCitations(message?.citations);
+    if (citations.length) {
+      const details = document.createElement('details');
+      details.append(makeElement('summary', '', `资料依据（${citations.length}）`));
+      const list = document.createElement('ul');
+      citations.forEach((citation) => list.append(makeElement('li', '', assistantCitationText(citation))));
+      details.append(list);
+      container.append(details);
+    }
+    const agent = normalizeAiAgent(message?.agent);
+    if (!agent) return;
+    const details = document.createElement('details');
+    const summaryParts = ['Agent 运行'];
+    if (agent.intent) summaryParts.push(agent.intent);
+    if (agent.trace.durationMs !== null) summaryParts.push(`${agent.trace.durationMs} ms`);
+    details.append(makeElement('summary', '', summaryParts.join(' · ')));
+    const list = document.createElement('ul');
+    if (agent.runId) list.append(makeElement('li', '', `Run ID：${agent.runId}`));
+    agent.tools.forEach((tool) => {
+      const status = tool.status ? `（${tool.status}）` : '';
+      const summary = tool.summary ? ` — ${tool.summary}` : '';
+      list.append(makeElement('li', '', `工具：${tool.name}${status}${summary}`));
+    });
+    agent.trace.nodes.forEach((node) => list.append(makeElement('li', '', `节点：${node}`)));
+    details.append(list);
+    container.append(details);
+  }
+
   function renderAiQuestionMessages(questionId, pending = false) {
     if (!aiQuestionMessages) return;
     aiQuestionMessages.replaceChildren();
@@ -1423,7 +1519,16 @@
       aiQuestionMessages.append(makeElement('p', 'ai-question-message', '可以问我选项辨析、原文证据或解题思路。回答会以当前题和你的作答为上下文。'));
     } else {
       history.forEach((message) => {
-        aiQuestionMessages.append(makeElement('p', `ai-question-message${message.role === 'user' ? ' ai-question-message--user' : ''}`, message.content));
+        const hasMetadata = message.role === 'assistant'
+          && (normalizeAiCitations(message.citations).length || normalizeAiAgent(message.agent));
+        if (!hasMetadata) {
+          aiQuestionMessages.append(makeElement('p', `ai-question-message${message.role === 'user' ? ' ai-question-message--user' : ''}`, message.content));
+          return;
+        }
+        const container = makeElement('article', 'ai-question-message');
+        container.append(makeElement('div', '', message.content));
+        appendAssistantMetadata(container, message);
+        aiQuestionMessages.append(container);
       });
     }
     if (pending) aiQuestionMessages.append(makeElement('p', 'ai-question-message is-pending', '正在结合本题资料整理回答…'));
@@ -1545,7 +1650,12 @@
       if (!reply) throw new Error('empty assistant reply');
       const disclaimer = String(data?.grounding?.disclaimer || '').trim();
       if (disclaimer && !reply.includes(disclaimer)) reply = `${reply}\n\n${disclaimer}`;
-      state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), { role: 'assistant', content: reply.slice(0, 2500), requestId }].slice(-12);
+      const assistantMessage = { role: 'assistant', content: reply.slice(0, 2500), requestId };
+      const citations = normalizeAiCitations(data?.citations ?? data?.grounding?.citations);
+      const agent = normalizeAiAgent(data?.agent);
+      if (citations.length) assistantMessage.citations = citations;
+      if (agent) assistantMessage.agent = agent;
+      state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), assistantMessage].slice(-12);
     } catch (error) {
       const failureMessage = error?.revisionChanged
         ? '试卷解析已发布新复核版本。请刷新题目后再提问，系统不会混用旧题与新答案。'

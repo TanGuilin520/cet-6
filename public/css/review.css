@@ -128,6 +128,33 @@ button:focus-visible, a:focus-visible { outline: 3px solid #dfaa33; outline-offs
 .issue-summary strong { display: block; margin-bottom: 3px; font-size: 13px; }
 .issue-summary ul { margin: 5px 0 0; padding-left: 17px; }
 
+.agent-suggestion { margin-bottom: 15px; padding: 12px; border: 1px solid #c9dfe8; border-radius: 10px; background: #f3f9fb; }
+.agent-suggestion > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.agent-suggestion > header div { min-width: 0; }
+.agent-suggestion > header strong, .agent-suggestion > header small { display: block; }
+.agent-suggestion > header strong { color: #245f79; font-size: 13px; }
+.agent-suggestion > header small { margin-top: 3px; color: #637983; font-size: 12px; font-weight: 500; line-height: 1.45; }
+.agent-suggestion > header button, .agent-apply-button { min-height: 34px; padding: 0 10px; flex: 0 0 auto; color: #fff; border: 1px solid #287fae; border-radius: 7px; background: #287fae; font-size: 12px; font-weight: 800; }
+.agent-suggestion > header button:hover, .agent-apply-button:hover { background: #206f99; }
+.agent-suggestion > header button:disabled, .agent-apply-button:disabled { opacity: .55; cursor: not-allowed; }
+.agent-suggestion-status { margin: 9px 0 0; color: #617680; font-size: 12px; line-height: 1.5; }
+.agent-suggestion-status.is-error { color: #9b413c; }
+.agent-suggestion-preview { margin-top: 10px; padding-top: 10px; border-top: 1px solid #d5e5ea; }
+.agent-suggestion-block + .agent-suggestion-block { margin-top: 10px; }
+.agent-suggestion-block h3 { margin: 0 0 4px; color: #355c70; font-size: 12px; }
+.agent-suggestion-block p { margin: 0; color: #526d79; font-size: 12px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-suggestion-block ul { margin: 4px 0 0; padding-left: 18px; color: #526d79; font-size: 12px; line-height: 1.55; }
+.agent-suggestion-operation { margin-top: 6px; padding: 8px 9px; border-radius: 7px; background: #fff; box-shadow: inset 0 0 0 1px #dce8ec; }
+.agent-suggestion-operation strong { display: block; color: #315e73; font-size: 12px; }
+.agent-suggestion-operation dl { margin: 5px 0 0; display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 3px 8px; color: #526d79; font-size: 12px; line-height: 1.45; }
+.agent-suggestion-operation dt { color: #748994; }
+.agent-suggestion-operation dd { min-width: 0; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-suggestion-trace { margin-top: 9px; color: #607782; font-size: 12px; }
+.agent-suggestion-trace summary { cursor: pointer; font-weight: 750; }
+.agent-suggestion-trace ul { margin: 5px 0 0; padding-left: 18px; line-height: 1.5; }
+.agent-suggestion-actions { margin-top: 11px; display: flex; justify-content: end; gap: 7px; }
+.agent-suggestion-actions button { min-height: 34px; padding: 0 10px; border-radius: 7px; font-size: 12px; font-weight: 800; }
+
 fieldset { min-width: 0; margin: 0 0 15px; padding: 13px; border: 1px solid #dce6e9; border-radius: 10px; }
 legend { padding: 0 7px; color: #2d6178; font-size: 13px; font-weight: 850; letter-spacing: .04em; }
 label { min-width: 0; color: #526b77; font-size: 12px; font-weight: 750; }
@@ -214,6 +241,8 @@ input:invalid:not(:focus):not(:placeholder-shown), textarea:invalid:not(:focus):
   .field-grid--three label:last-child { grid-column: 1 / -1; }
   .field-grid--bbox { grid-template-columns: repeat(2, 1fr); }
   .field-grid--bbox label:first-child { grid-column: 1 / -1; }
+  .agent-suggestion > header { align-items: flex-start; }
+  .agent-suggestion > header button { min-width: 82px; }
   .editor-actions { padding: 9px 12px calc(9px + env(safe-area-inset-bottom)); display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); position: fixed; right: 0; bottom: 0; left: 0; z-index: 20; border-top: 1px solid #d6e2e6; background: rgba(255,255,255,.97); box-shadow: 0 -7px 21px rgba(28,61,78,.09); backdrop-filter: blur(10px); }
   .editor-actions > span { display: none; }
   .danger-button { border: 1px solid #ecd5d2; }
