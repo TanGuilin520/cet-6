@@ -1,0 +1,9 @@
+**
+!.dockerignore
+!services/
+!services/__init__.py
+!services/paddleocr/
+!services/paddleocr/Dockerfile
+!services/paddleocr/__init__.py
+!services/paddleocr/app.py
+!services/paddleocr/requirements.txt

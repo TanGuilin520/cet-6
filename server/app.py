@@ -147,11 +147,18 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
             return
         self._json_error(HTTPStatus.NOT_FOUND, "API endpoint not found")
 
+    def do_PATCH(self) -> None:  # noqa: N802 - inherited stdlib API
+        parsed = urlparse(self.path)
+        if PLATFORM_API.handle_patch(self, parsed):
+            return
+        self._json_error(HTTPStatus.NOT_FOUND, "API endpoint not found")
+
     def _json_response(
         self,
         status: HTTPStatus,
         body: dict[str, object],
         include_body: bool = True,
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -159,6 +166,8 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         if include_body:
             self.wfile.write(payload)

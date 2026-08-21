@@ -486,6 +486,8 @@
     setText($('#ready-summary'), readySummary);
     const openReader = $('#open-reader');
     if (openReader && examId) openReader.href = 'reader.html?paper=' + encodeURIComponent(examId);
+    const openReview = $('#open-review');
+    if (openReview && examId) openReview.href = 'review.html?exam=' + encodeURIComponent(examId);
     $('#processing-error').hidden = true;
     $('#processing-ready').hidden = false;
     $('#processing-ready').focus();
@@ -598,9 +600,13 @@
         if (exam?.createdAt) time.dateTime = String(exam.createdAt);
         footer.append(time);
         if (exam?.status === 'ready' && examId) {
-          const link = createElement('a', '', '打开试卷 →');
-          link.href = 'reader.html?paper=' + encodeURIComponent(examId);
-          footer.append(link);
+          const actions = createElement('span', 'recent-card-actions');
+          const reviewLink = createElement('a', '', '复核');
+          reviewLink.href = 'review.html?exam=' + encodeURIComponent(examId);
+          const readerLink = createElement('a', '', '打开 →');
+          readerLink.href = 'reader.html?paper=' + encodeURIComponent(examId);
+          actions.append(reviewLink, readerLink);
+          footer.append(actions);
         } else {
           footer.append(createElement('span', 'recent-stage', String(exam?.message || exam?.stage || '正在处理')));
         }
@@ -668,6 +674,35 @@
     }
   }
 
+  async function loadCapabilities() {
+    const output = $('#ocr-capability');
+    if (!output) return;
+    try {
+      const response = await fetch('/api/exams/capabilities', {
+        headers: { Accept: 'application/json' },
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error(`capabilities request failed: ${response.status}`);
+      const data = await response.json();
+      const ocr = data?.ocr || {};
+      if (data?.pdf?.scanned) {
+        const labels = {
+          paddleocr: 'PaddleOCR',
+          ocrmypdf: 'OCRmyPDF',
+          tesseract: 'Tesseract',
+        };
+        output.dataset.state = 'ready';
+        output.textContent = `扫描卷识别可用：${labels[ocr.preferred] || 'OCR 引擎'}。`;
+      } else {
+        output.dataset.state = 'warning';
+        output.textContent = '当前只能处理带文字层的 PDF；请启动 PaddleOCR sidecar 或安装 OCRmyPDF/Tesseract。';
+      }
+    } catch (_error) {
+      output.dataset.state = 'warning';
+      output.textContent = '暂时无法读取 OCR 能力；上传扫描卷前请先确认 OCR 服务已启动。';
+    }
+  }
+
   $$('input[type="file"]', form).forEach((input) => {
     input.addEventListener('change', () => {
       updateFileField(input);
@@ -699,5 +734,6 @@
   refreshButton?.addEventListener('click', loadRecentExams);
   addEventListener('beforeunload', stopPolling);
 
+  loadCapabilities();
   loadRecentExams();
 })();

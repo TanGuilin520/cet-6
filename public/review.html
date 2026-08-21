@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="复核自动解析的 CET 试卷题目、选项与答案，并保留人工修改理由。" />
+    <meta name="theme-color" content="#173b5b" />
+    <title>解析复核 · 四级真题库</title>
+    <link rel="stylesheet" href="css/review.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#review-main">跳到复核内容</a>
+
+    <header class="review-header">
+      <a class="review-brand" href="upload.html" aria-label="返回导入试卷">
+        <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+        <span><strong>解析复核</strong><small>CET REVIEW WORKSPACE</small></span>
+      </a>
+      <div class="header-title">
+        <span id="exam-title">正在读取试卷…</span>
+        <small id="revision-label">版本 –</small>
+      </div>
+      <nav class="header-actions" aria-label="试卷操作">
+        <a href="upload.html">返回导入</a>
+        <a id="open-reader" aria-disabled="true" tabindex="-1">打开阅读器</a>
+      </nav>
+    </header>
+
+    <main class="review-main" id="review-main">
+      <section class="fatal-state" id="fatal-state" role="alert" tabindex="-1" hidden>
+        <span aria-hidden="true">!</span>
+        <div><h1>暂时无法打开复核工作台</h1><p id="fatal-message"></p></div>
+        <button id="retry-load" type="button">重新加载</button>
+      </section>
+
+      <section class="review-workspace" id="review-workspace" hidden aria-busy="true">
+        <aside class="review-queue" aria-labelledby="queue-title">
+          <header class="queue-heading">
+            <div><p>REVIEW QUEUE</p><h1 id="queue-title">解析项目</h1></div>
+            <button class="icon-button" id="reload-review" type="button" title="重新读取服务器数据" aria-label="重新读取服务器数据">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5" /><path d="M6.1 9a7 7 0 0 1 11.5-2L20 9M4 15l2.4 2a7 7 0 0 0 11.5-2" /></svg>
+            </button>
+          </header>
+
+          <dl class="review-metrics" aria-label="复核统计">
+            <div><dt id="metric-total">0</dt><dd>全部</dd></div>
+            <div><dt id="metric-pending">0</dt><dd>待复核</dd></div>
+            <div><dt id="metric-missing">0</dt><dd>缺题</dd></div>
+            <div><dt id="metric-conflict">0</dt><dd>冲突</dd></div>
+          </dl>
+
+          <div class="queue-tools">
+            <label class="search-field" for="review-search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m16.5 16.5 4 4" /></svg>
+              <span class="visually-hidden">搜索题号或题干</span>
+              <input id="review-search" type="search" maxlength="80" autocomplete="off" placeholder="搜索题号或题干" />
+            </label>
+            <div class="filter-tabs" id="filter-tabs" role="group" aria-label="筛选解析项目">
+              <button type="button" data-filter="pending" aria-pressed="true">待复核</button>
+              <button type="button" data-filter="missing" aria-pressed="false">缺题</button>
+              <button type="button" data-filter="low" aria-pressed="false">低置信</button>
+              <button type="button" data-filter="conflict" aria-pressed="false">答案冲突</button>
+              <button type="button" data-filter="all" aria-pressed="false">全部</button>
+            </div>
+          </div>
+
+          <nav class="queue-list" id="queue-list" aria-label="题目复核列表"></nav>
+          <p class="queue-empty" id="queue-empty" hidden>当前筛选下没有项目。</p>
+          <button class="add-question-button" id="add-question" type="button">＋ 手动新增题目</button>
+        </aside>
+
+        <section class="page-preview" aria-labelledby="preview-title">
+          <header class="preview-toolbar">
+            <div><p>ORIGINAL PAGE</p><h2 id="preview-title">原卷定位</h2></div>
+            <div class="page-controls">
+              <button id="previous-page" type="button" aria-label="上一页">←</button>
+              <label for="preview-page"><span class="visually-hidden">预览页码</span><select id="preview-page"></select></label>
+              <button id="next-page" type="button" aria-label="下一页">→</button>
+            </div>
+          </header>
+          <div class="page-stage" id="page-stage" aria-live="polite">
+            <p class="page-placeholder" id="page-placeholder">选择左侧项目后，将在这里显示原卷页面与题目范围。</p>
+            <div class="page-canvas" id="page-canvas" hidden>
+              <img id="page-image" alt="" draggable="false" />
+              <span class="bbox-overlay" id="bbox-overlay" aria-hidden="true"></span>
+            </div>
+          </div>
+          <p class="preview-help">黄色框表示当前题目的 PDF 坐标范围。修改页码或坐标后，预览会同步更新。</p>
+        </section>
+
+        <aside class="review-editor" aria-labelledby="editor-title">
+          <header class="editor-heading">
+            <div><p>STRUCTURED DATA</p><h2 id="editor-title">选择一个项目</h2></div>
+            <span class="dirty-indicator" id="dirty-indicator" hidden>未保存</span>
+          </header>
+
+          <div class="editor-empty" id="editor-empty">
+            <span aria-hidden="true">⌖</span>
+            <p>从左侧选择低置信度题目、缺失题号或答案冲突，然后对照原卷修改。</p>
+          </div>
+
+          <form id="review-form" novalidate hidden>
+            <section class="issue-summary" id="issue-summary" aria-live="polite"></section>
+
+            <fieldset>
+              <legend>题目</legend>
+              <div class="field-grid field-grid--three">
+                <label>Question ID<input id="question-id" name="questionId" type="text" maxlength="20" autocomplete="off" required /></label>
+                <label>题号<input id="question-number" name="number" type="text" maxlength="20" autocomplete="off" required /></label>
+                <label>题型
+                  <select id="question-type" name="type">
+                    <option value="single_choice">单项选择</option>
+                    <option value="matching">段落匹配</option>
+                    <option value="writing">写作</option>
+                    <option value="translation">翻译</option>
+                    <option value="unknown">待确认</option>
+                  </select>
+                </label>
+              </div>
+
+              <label class="full-field">题干（听力客观题可留空）<textarea id="question-stem" name="stem" rows="5" maxlength="12000"></textarea></label>
+
+              <div class="field-heading-row"><strong>原卷坐标</strong><small>单位为 PDF point</small></div>
+              <div class="field-grid field-grid--bbox">
+                <label>页码<input id="question-page" name="page" type="number" min="1" max="120" step="1" required /></label>
+                <label>X<input id="bbox-x" name="x" type="number" min="0" step="0.001" required /></label>
+                <label>Y<input id="bbox-y" name="y" type="number" min="0" step="0.001" required /></label>
+                <label>宽<input id="bbox-width" name="width" type="number" min="0.001" step="0.001" required /></label>
+                <label>高<input id="bbox-height" name="height" type="number" min="0.001" step="0.001" required /></label>
+              </div>
+
+              <div class="field-heading-row"><strong>选项</strong><button id="add-option" type="button">＋ 添加选项</button></div>
+              <div class="option-editor" id="option-editor"></div>
+            </fieldset>
+
+            <fieldset>
+              <legend>答案资料</legend>
+              <div class="answer-grid">
+                <label>正确答案<input id="answer-value" name="answer" type="text" maxlength="1" autocomplete="off" placeholder="例如 C；没有明确答案时留空" /></label>
+                <label>官方解析<textarea id="answer-explanation" name="explanation" rows="5" maxlength="12000" placeholder="只填写答案 PDF 中能够确认的内容"></textarea></label>
+              </div>
+              <label class="answer-removal" id="answer-removal-control" hidden>
+                <input id="remove-answer-with-save" name="removeAnswerWithSave" type="checkbox" />
+                <span><strong>保存时同时移除已有答案</strong><small>更改题型或选项导致原答案失效时使用；会与题目修改写入同一版本。</small></span>
+              </label>
+              <p class="field-note">答案为空时不会创建答案记录；已有答案不会被静默删除。只删除答案可使用下方“移除答案”。</p>
+            </fieldset>
+
+            <label class="reason-field" for="review-reason">
+              <span>修改理由 <b aria-hidden="true">*</b></span>
+              <textarea id="review-reason" name="reason" rows="3" minlength="3" maxlength="500" required placeholder="例如：对照原卷第 5 页，补全缺失的第 26 题及四个选项。"></textarea>
+              <small>理由会写入修订记录，不能只填写“修改”。</small>
+            </label>
+
+            <p class="form-error" id="form-error" role="alert" tabindex="-1" hidden></p>
+            <div class="editor-actions">
+              <button class="danger-button" id="remove-question" type="button">移除题目</button>
+              <button class="danger-button" id="remove-answer" type="button">移除答案</button>
+              <span></span>
+              <button class="secondary-button" id="reset-form" type="button">撤销表单修改</button>
+              <button class="primary-button" id="save-review" type="submit">保存复核</button>
+            </div>
+          </form>
+        </aside>
+      </section>
+    </main>
+
+    <section class="conflict-banner" id="conflict-banner" role="alertdialog" aria-labelledby="conflict-title" aria-describedby="conflict-message" hidden>
+      <div><strong id="conflict-title">服务器数据已经更新</strong><p id="conflict-message">为避免覆盖其他人的修改，请重新读取最新版本后再编辑。</p></div>
+      <button id="reload-conflict" type="button">读取最新版本</button>
+    </section>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="js/review.js"></script>
+  </body>
+</html>

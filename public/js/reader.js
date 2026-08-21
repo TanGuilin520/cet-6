@@ -137,6 +137,10 @@
     return Object.fromEntries(entries);
   }
 
+  function normalizeStoredRevision(value) {
+    return Number.isInteger(value) && value >= 0 ? value : null;
+  }
+
   function parseWritingTemplate(source, previousSlots = []) {
     const text = String(source || '').replace(/\0/g, '').slice(0, MAX_TEMPLATE_SOURCE_CHARS);
     const previous = new Map((Array.isArray(previousSlots) ? previousSlots : []).map((slot) => [String(slot?.name || ''), String(slot?.value || '')]));
@@ -185,6 +189,7 @@
     submitted: stored.submitted === true,
     grade: stored.grade && typeof stored.grade === 'object' ? stored.grade : null,
     aiHistory: normalizeStoredHistory(stored.aiHistory),
+    aiHistoryRevision: normalizeStoredRevision(stored.aiHistoryRevision),
     writingTemplates: normalizeStoredWritingTemplates(stored.writingTemplates),
     history: [],
   };
@@ -208,6 +213,8 @@
   let answerKey = new Map();
   let questionReviewSummary = null;
   let answerReviewSummary = null;
+  let questionDataRevision = null;
+  let questionDataEtag = '';
   let expandedQuestionId = '';
   let aiPanelQuestionId = '';
   let assistantRequestId = 0;
@@ -392,6 +399,24 @@
     }).filter(([questionId, value]) => questionId && value.answer));
   }
 
+  function reviewVersionFromResponse(response, payload) {
+    const etag = String(response?.headers?.get('ETag') || '').trim();
+    const match = /^"review-r(0|[1-9]\d*)"$/.exec(etag);
+    const payloadRevision = Number(payload?.revision);
+    return {
+      etag: match ? etag : '',
+      revision: match
+        ? Number(match[1])
+        : Number.isInteger(payloadRevision) && payloadRevision >= 0 ? payloadRevision : null,
+    };
+  }
+
+  function versionedDocumentHeaders() {
+    return questionDataEtag
+      ? { Accept: 'application/json', 'If-Match': questionDataEtag }
+      : { Accept: 'application/json' };
+  }
+
   function currentQuestion() {
     return questions.find((question) => question.id === state.currentQuestionId) || questions[0] || null;
   }
@@ -555,6 +580,7 @@
           submitted: state.submitted,
           grade: state.grade,
           aiHistory: normalizeStoredHistory(state.aiHistory),
+          aiHistoryRevision: state.aiHistoryRevision,
           writingTemplates: normalizeStoredWritingTemplates(state.writingTemplates),
         }));
         indicator?.classList.remove('is-saving');
@@ -1255,6 +1281,30 @@
       if (response.status === 404) return;
       if (!response.ok) throw new Error(`questions request failed: ${response.status}`);
       const payload = await response.json();
+      const version = reviewVersionFromResponse(response, payload);
+      questionDataRevision = version.revision;
+      questionDataEtag = version.etag;
+      if (
+        questionDataRevision !== null
+        && state.aiHistoryRevision !== questionDataRevision
+      ) {
+        const hadHistory = Object.values(state.aiHistory).some((messages) => Array.isArray(messages) && messages.length);
+        state.aiHistory = {};
+        state.aiHistoryRevision = questionDataRevision;
+        aiQuestionDrafts.clear();
+        save();
+        if (hadHistory) showToast('解析复核版本已更新，旧版本的 AI 对话已清除');
+      }
+      if (
+        state.submitted
+        && questionDataRevision !== null
+        && state.grade?.reviewRevision !== questionDataRevision
+      ) {
+        state.submitted = false;
+        state.grade = null;
+        save();
+        showToast('解析复核版本已更新，旧批改结果已清除，请重新交卷');
+      }
       questions = normalizeQuestionsPayload(payload).map((question) => ({
         ...question,
         page: clamp(question.page, 1, manifest.pageCount),
@@ -1279,13 +1329,19 @@
         if (label && pageQuestions.length) label.textContent = `题 ${pageQuestions[0].number}${pageQuestions.length > 1 ? `–${pageQuestions[pageQuestions.length - 1].number}` : ''}`;
       });
       if (state.submitted && paperConfig.answersUrl) {
-        fetch(paperConfig.answersUrl, { headers: { Accept: 'application/json' } }).then((answerResponse) => {
+        fetch(paperConfig.answersUrl, { headers: versionedDocumentHeaders() }).then((answerResponse) => {
+          if (answerResponse.status === 412) throw Object.assign(new Error('review revision changed'), { revisionChanged: true });
           if (!answerResponse.ok) throw new Error(`answers request failed: ${answerResponse.status}`);
           return answerResponse.json();
         }).then((payload) => {
           answerKey = normalizeAnswerKey(payload);
           renderQuestionInterface();
-        }).catch((error) => console.warn('Stored grading details unavailable:', error));
+        }).catch((error) => {
+          if (error?.revisionChanged) {
+            showToast('解析复核版本已更新，请刷新后重新查看批改结果');
+          }
+          console.warn('Stored grading details unavailable:', error);
+        });
       }
     } catch (error) {
       if ($('#exam-audio')?.hidden !== false) {
@@ -1301,7 +1357,15 @@
     submitExamButton.disabled = true;
     submitExamButton.textContent = '正在读取本卷答案…';
     try {
-      const response = await fetch(paperConfig.answersUrl, { headers: { Accept: 'application/json' } });
+      const response = await fetch(paperConfig.answersUrl, { headers: versionedDocumentHeaders() });
+      if (response.status === 412) {
+        state.submitted = false;
+        state.grade = null;
+        save();
+        showToast('解析复核版本已更新，正在重新载入题目；请确认后再次交卷');
+        await loadQuestionData();
+        return;
+      }
       if (!response.ok) throw new Error(`answers request failed: ${response.status}`);
       answerKey = normalizeAnswerKey(await response.json());
       const objectiveQuestions = questions.filter((question) => question.objective && answerKey.has(question.id));
@@ -1336,6 +1400,7 @@
           reading: summarize(readingQuestions, '阅读'),
         },
         ungraded: questions.filter((question) => question.objective && !answerKey.has(question.id)).length,
+        reviewRevision: questionDataRevision,
         submittedAt: Date.now(),
       };
       renderQuestionInterface();
@@ -1439,6 +1504,7 @@
     const cleanMessage = String(message || '').trim().slice(0, 2000);
     if (!cleanMessage) return;
     const questionId = question.id;
+    const requestRevision = questionDataRevision;
     const requestId = ++assistantRequestId;
     const history = state.aiHistory[question.id] || [];
     const requestHistory = history.slice(-12).map(({ role, content }) => ({ role, content }));
@@ -1450,6 +1516,9 @@
     save();
     try {
       const body = { questionId: question.id, message: cleanMessage, history: requestHistory };
+      if (Number.isInteger(requestRevision) && requestRevision >= 0) {
+        body.reviewRevision = requestRevision;
+      }
       const userAnswer = String(state.answers[question.id] || '').trim();
       if (userAnswer) body.userAnswer = userAnswer.slice(0, 100);
       const response = await fetch(paperConfig.assistantUrl, {
@@ -1457,15 +1526,34 @@
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(body),
       });
+      if (response.status === 409) {
+        throw Object.assign(new Error('review revision changed'), { revisionChanged: true });
+      }
       if (!response.ok) throw new Error(`assistant request failed: ${response.status}`);
       const data = await response.json();
+      if (
+        Number.isInteger(requestRevision)
+        && Number.isInteger(data?.revision)
+        && data.revision !== requestRevision
+      ) {
+        throw Object.assign(new Error('assistant revision mismatch'), { revisionChanged: true });
+      }
+      if (requestRevision !== questionDataRevision) {
+        throw Object.assign(new Error('assistant request belongs to an older review revision'), { revisionChanged: true, staleRequest: true });
+      }
       let reply = String(data?.reply ?? data?.message ?? '').trim();
       if (!reply) throw new Error('empty assistant reply');
       const disclaimer = String(data?.grounding?.disclaimer || '').trim();
       if (disclaimer && !reply.includes(disclaimer)) reply = `${reply}\n\n${disclaimer}`;
       state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), { role: 'assistant', content: reply.slice(0, 2500), requestId }].slice(-12);
     } catch (error) {
-      state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), { role: 'assistant', content: '本题助手暂时不可用，请稍后重试。', requestId }].slice(-12);
+      const failureMessage = error?.revisionChanged
+        ? '试卷解析已发布新复核版本。请刷新题目后再提问，系统不会混用旧题与新答案。'
+        : '本题助手暂时不可用，请稍后重试。';
+      if (!error?.staleRequest) {
+        state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), { role: 'assistant', content: failureMessage, requestId }].slice(-12);
+      }
+      if (error?.revisionChanged) loadQuestionData();
       console.warn('Question assistant unavailable:', error);
     } finally {
       assistantPendingQuestions.delete(questionId);
