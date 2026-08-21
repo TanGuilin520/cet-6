@@ -24,3 +24,6 @@ data/exams/
 .idea/
 .vscode/
 node_modules/
+
+# Local Codex helper experiments are not part of the CET application.
+tools/codex-instruct-*.py
