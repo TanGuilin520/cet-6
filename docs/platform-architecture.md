@@ -40,10 +40,12 @@ PDF 签名与页数校验
         ↓
 pdftotext -bbox-layout
         ↓
-有效文字是否足够？ ── 是 ──→ 使用原生文字坐标
+逐页文字是否足够？ ── 是 ──→ 使用原生文字坐标
         │
         否
         ↓
+PaddleOCR sidecar（若配置）
+        │ 无/不可用
 OCRmyPDF（若安装）
         │ 无
 Tesseract TSV + pdftoppm（若安装）
@@ -56,11 +58,13 @@ manifest.json
 ```
 
 - Poppler 的 `pdftotext -bbox-layout` 提供单词及矩形坐标。
-- `pdftoppm` 生成页面图；坐标仍使用 PDF point，不使用 JPG 像素。
-- OCRmyPDF 可把扫描件转换成带文字层 PDF，再回到同一坐标提取路径。
+- `pdftoppm` 一次批量生成整卷页面图，避免逐页重复打开 PDF；坐标仍使用 PDF point，不使用 JPG 像素。
+- PaddleOCR 在独立 Python 3.10/3.11 sidecar 中运行。主服务只发送共享根目录下的相对页面图路径，严格校验返回页集合、图像尺寸、有限坐标和置信度，再把像素框映射回原 PDF point。
+- 混合 PDF 保留有文字页的原生坐标，只对文字稀疏页调用 PaddleOCR；sidecar 失败时不覆盖已有文字，并继续尝试原有 OCR 回退。
+- OCRmyPDF 可把扫描件转换成带文字层 PDF，再回到同一坐标提取路径。这里刻意关闭旋转和 deskew：阅读器渲染的是原始 PDF，OCR 坐标必须与原图保持同一几何空间。
 - Tesseract 兜底读取 TSV 像素框，并按页面宽高换算为 PDF point。
 - OCR 语言默认自动检测：同时有 `eng` 和 `chi_sim` 时使用 `eng+chi_sim`；也可用 `CET_OCR_LANGUAGES` 显式配置。
-- 如果服务器没有 OCR 引擎，扫描件任务会明确失败并说明依赖，不会生成空白“成功”结果。
+- 纯扫描件在没有可用 OCR 引擎时会明确失败并说明依赖。混合 PDF 会保留已有文字页，并在 manifest 中列出仍无足够文字的页面，避免把空白页或 OCR 失败静默伪装成已识别。
 
 `manifest.json` 与旧阅读器格式兼容：
 
@@ -75,11 +79,19 @@ manifest.json
       "width": 595.276,
       "height": 841.89,
       "image": "/api/exams/.../assets/pages/page-1.jpg",
+      "textSource": "pdf_text",
       "words": [{"text": "example", "x": 10, "y": 20, "width": 30, "height": 9}]
     }
-  ]
+  ],
+  "extraction": {
+    "engine": "pdf_text+paddleocr",
+    "unresolvedTextPages": [],
+    "ocrNotice": null
+  }
 }
 ```
+
+每页 `textSource` 记录 `pdf_text`、`paddleocr`、`ocrmypdf` 或 `tesseract`。结构化解析按实际页面来源计算置信度，不会因为同卷另一页使用 OCR 而整体降低原生文字页的可信度。
 
 ## 4. 题目结构化
 
@@ -98,6 +110,14 @@ manifest.json
 相邻已识别题号之间的缺口写入 `questions.json.unresolved`。系统报告题号和原因，但不生成虚假题干，也不把它加入自动批改。
 
 当前结构解析器是可审计的 MVP，不是视觉大模型。后续接入视觉模型时，应保留现有验证层：模型候选必须能回指页面、文字或图像证据，且上传者应明确同意把试卷内容发送给外部服务。
+
+### 解析复核与发布
+
+`review.html?exam=<examId>` 聚合缺失题号、低置信度题目、答案冲突和待确认项。编辑器显示原卷页与 bbox，允许补题、修改题目/选项、绑定答案或移除错误记录。
+
+复核写入使用 `PATCH /api/exams/{id}/review`。客户端同时提交 `If-Match: "review-rN"` 和 `baseRevision`，服务端完成字段白名单、题号唯一性、页面/bbox 边界、选项与答案交叉验证后，先生成不可变 revision 快照和审计哈希，再原子切换 `review/current.json`。并发版本变化返回冲突，不能静默覆盖。指针读取时会重新校验快照 schema 与文件哈希；若上次进程在指针切换前留下孤立 revision，后续发布会跳过该编号，不会永久卡住。
+
+`/questions` 和 `/answers` 的响应均携带同一形式的 revision ETag。Reader 先取得题目版本，再用 `If-Match` 读取答案；版本在两次请求之间发生变化时，服务返回前置条件失败，页面重新加载而不会拿旧题配新答案评分。AI 请求同样携带 `reviewRevision`，服务端在一个锁定快照中读取题目、答案与 RAG。复核发布后，`status.json.result.reviewCounts` 与版本号也同步更新，因此上传历史不会继续显示旧的待复核数量。
 
 ## 5. 答案解析与批改
 
@@ -127,7 +147,7 @@ questionId 精确查询
 DeepSeek（配置密钥时）或本地保守回答
 ```
 
-题号精确检索永远优先；向量结果只能补充背景，不能覆盖当前题答案。这里的本地哈希向量是零依赖检索基线，不等同于生产级语义 Embedding 服务。
+题号精确检索永远优先；向量结果只能补充背景，不能覆盖当前题答案。人工改正或移除答案时，同题旧的原始答案片段会从新 revision 的检索库中清除，避免旧答案与新答案同时进入提示词；证据来源会区分上传答案 PDF 与人工核对。这里的本地哈希向量是零依赖检索基线，不等同于生产级语义 Embedding 服务。
 
 若当前题没有答案 PDF 官方解析，响应固定携带：
 
@@ -135,9 +155,9 @@ DeepSeek（配置密钥时）或本地保守回答
 
 没有配置 DeepSeek 时，服务仍返回题号、用户答案、明确答案和免责声明，但不会推断“其他选项为什么错误”。配置 DeepSeek 后，题目、用户问题以及检索到的答案资料会发送给 DeepSeek；部署者需要在隐私说明中披露这一点。
 
-每道题的对话历史按 `examId + questionId` 保存在浏览器，限制题数、消息数和长度，避免耗尽 `localStorage`。
+每道题的对话历史按 `examId + questionId` 保存在浏览器，并额外记录 `reviewRevision`；同时限制题数、消息数和长度，避免耗尽 `localStorage`。人工复核发布新版本后，旧版本题解会被清除，不能作为新版答案的后续上下文。
 
-桌面端 AI 使用无 backdrop 的固定悬浮窗，可在继续答题时保持打开或最小化；移动端改为带遮罩的全屏面板。切题时保存并恢复对应问题草稿，发送请求前固定捕获 `aiPanelQuestionId`，pending 和响应也按原题号回写，避免慢请求串入另一题。这不改变后端 `{questionId,message,userAnswer?,history}` 契约。当前 `userAnswer` 仍只附带前 100 个字符，因此本阶段不宣称 AI 能读取整篇作文。
+桌面端 AI 使用无 backdrop 的固定悬浮窗，可在继续答题时保持打开或最小化；移动端改为带遮罩的全屏面板。切题时保存并恢复对应问题草稿，发送请求前固定捕获 `aiPanelQuestionId`，pending 和响应也按原题号回写，避免慢请求串入另一题。后端契约是在原 `{questionId,message,userAnswer?,history}` 上增加可选 `reviewRevision`；旧客户端仍可请求，新 Reader 用它阻止跨修订解释。当前 `userAnswer` 仍只附带前 100 个字符，因此本阶段不宣称 AI 能读取整篇作文。
 
 ## 7. 听力
 
@@ -157,13 +177,16 @@ data/exams/<examId>/
 ├── questions.json
 ├── answers.json
 ├── rag.sqlite3
+├── review/
+│   ├── current.json       当前原子 revision 指针
+│   └── revisions/        不可变 questions/answers/RAG/audit 快照
 ├── metadata.json
 └── status.json
 ```
 
 - `data/exams/` 已加入 `.gitignore`。
 - 上传文件不放入 `public/`，只能通过严格 examId/文件名路由读取。
-- POST 接口拒绝跨源浏览器请求；请求体、文件大小、页数、消息数和文本长度都有上限。
+- POST/PATCH 接口拒绝跨源浏览器请求；当前复核 PATCH 还限制为本机 loopback，并要求 ETag 前置条件。loopback 只是本地开发保护，不是公网反向代理后的鉴权；对外部署前仍必须增加真实身份认证和授权。请求体、文件大小、页数、消息数和文本长度都有上限。
 - 文件路由防目录穿越，并提供 `nosniff`；音频支持单段 Range。
 - API 密钥仅由服务端环境读取，不进入 HTML、JavaScript 或 `localStorage`。
 - 写作模板文件只在浏览器用严格 UTF-8 解码器读取，拒绝 NUL、错误后缀和超限内容；预览只写入 `textContent`/表单 `value`，不解析 HTML，也不上传服务器或自动发送给 AI。
@@ -173,9 +196,8 @@ data/exams/<examId>/
 
 下一阶段可在不改变阅读器五层结构的前提下增加：
 
-1. 带用户确认界面的低置信度题目编辑器；
-2. 明确授权的视觉模型结构解析，并用当前规则做证据校验；
-3. 真实语义 Embedding 与向量数据库；
-4. ASR、音频时间戳和题目片段；
-5. Users、Exams、Questions、UserAnswers、Annotations、AI Conversations 云端表；
-6. 登录、权限、云同步与后台任务基础设施。
+1. 明确授权的视觉模型结构解析，并用当前规则和复核工作台做证据校验；
+2. 真实语义 Embedding 与向量数据库；
+3. ASR、音频时间戳和题目片段；
+4. Users、Exams、Questions、UserAnswers、Annotations、AI Conversations 云端表；
+5. 登录、权限、云同步与持久后台任务基础设施。

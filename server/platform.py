@@ -6,14 +6,15 @@ does not publish uploaded files through ``public/`` and it produces the same
 page/word manifest shape already consumed by the reader.
 
 Only the Python standard library is required.  PDF and OCR work is delegated
-to bounded command-line adapters (Poppler, OCRmyPDF, and Tesseract) when those
-programs are installed.
+to bounded adapters (Poppler, the optional PaddleOCR sidecar, OCRmyPDF, and
+Tesseract) when those services or programs are installed.
 """
 
 from __future__ import annotations
 
 import cgi
 import hashlib
+import ipaddress
 import json
 import math
 import mimetypes
@@ -32,8 +33,10 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
+
+from .paddle_ocr import PaddleOCRClient, PaddleOCRError, PaddleOCRUnavailable
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +51,9 @@ MAX_TITLE_CHARS = 160
 MAX_ASSISTANT_BYTES = 48 * 1024
 MAX_ASSISTANT_MESSAGE_CHARS = 8_000
 MAX_ASSISTANT_HISTORY = 12
+MAX_REVIEW_BYTES = 256 * 1024
+MAX_REVIEW_OPERATIONS = 100
+MAX_REVIEW_REASON_CHARS = 500
 PDF_TIMEOUT_SECONDS = 180
 OCR_TIMEOUT_SECONDS = 900
 DEEPSEEK_TIMEOUT_SECONDS = 60
@@ -55,6 +61,11 @@ DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
 SAFE_EXAM_ID = re.compile(r"^exam-[0-9]{8}-[0-9a-f]{12}$")
 SAFE_PAGE_ASSET = re.compile(r"^page-[1-9][0-9]{0,2}\.jpg$")
+SAFE_QUESTION_ID = re.compile(
+    r"^(?:q([1-9][0-9]{0,2})|(writing|translation)-([1-9][0-9]{0,2}))$"
+)
+SAFE_REVIEW_REVISION_DIRECTORY = re.compile(r"^[0-9]{6}$")
+QUESTION_TYPES = frozenset({"single_choice", "matching", "writing", "translation", "unknown"})
 QUESTION_START = re.compile(r"^\s*(?:question\s+)?([1-9][0-9]{0,2})\s*[.、)]\s*(.*)$", re.I)
 OPTION_START = re.compile(r"^\s*([A-D])\s*[.、)]\s*(.+)$", re.I)
 INDIVIDUAL_ANSWER = re.compile(
@@ -157,6 +168,350 @@ def _unresolved_question_gaps(items: list[dict[str, object]]) -> list[dict[str, 
         for number in range(numbers[0], numbers[-1] + 1)
         if number not in present
     ]
+
+
+def _review_etag(revision: int) -> str:
+    return f'"review-r{max(0, int(revision))}"'
+
+
+def _review_document_digest(document: dict[str, object]) -> str:
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _parse_review_etag(value: str) -> int:
+    match = re.fullmatch(r'"review-r(0|[1-9][0-9]*)"', str(value or "").strip())
+    if not match:
+        raise PlatformError(
+            'If-Match must contain the current review ETag, for example "review-r0"',
+            HTTPStatus.PRECONDITION_REQUIRED,
+        )
+    return int(match.group(1))
+
+
+def _review_text(value: object, label: str, maximum: int, *, required: bool = False) -> str:
+    if not isinstance(value, str):
+        raise PlatformError(f"{label} must be a string")
+    text = unicodedata.normalize("NFC", value).strip()
+    if required and not text:
+        raise PlatformError(f"{label} must not be empty")
+    if len(text) > maximum:
+        raise PlatformError(f"{label} may contain at most {maximum} characters")
+    if any(unicodedata.category(character) == "Cc" and character not in "\n\t" for character in text):
+        raise PlatformError(f"{label} contains unsupported control characters")
+    return text
+
+
+def _review_page_dimensions(manifest: dict[str, object]) -> dict[int, tuple[float, float]]:
+    dimensions: dict[int, tuple[float, float]] = {}
+    pages = manifest.get("pages", [])
+    if not isinstance(pages, list):
+        return dimensions
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        try:
+            number = int(page["number"])
+            width = float(page["width"])
+            height = float(page["height"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if number > 0 and width > 0 and height > 0 and all(math.isfinite(value) for value in (width, height)):
+            dimensions[number] = (width, height)
+    return dimensions
+
+
+def _normalize_review_question(
+    raw: object,
+    manifest: dict[str, object],
+    existing: dict[str, object] | None,
+    revision: int,
+    actor: str,
+    reviewed_at: str,
+) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise PlatformError("upsertQuestion.question must be an object")
+    allowed = {"questionId", "number", "type", "page", "bbox", "stem", "options"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise PlatformError(f"question contains unsupported fields: {', '.join(sorted(unknown))}")
+    missing = allowed - set(raw)
+    if missing:
+        raise PlatformError(f"question is missing fields: {', '.join(sorted(missing))}")
+
+    question_id = _review_text(raw.get("questionId"), "question.questionId", 32, required=True)
+    identifier = SAFE_QUESTION_ID.fullmatch(question_id)
+    if not identifier:
+        raise PlatformError("question.questionId must look like q26, writing-1, or translation-1")
+    question_type = _review_text(raw.get("type"), "question.type", 32, required=True)
+    if question_type not in QUESTION_TYPES:
+        raise PlatformError(f"question.type must be one of: {', '.join(sorted(QUESTION_TYPES))}")
+
+    objective_number, long_type, _ = identifier.groups()
+    raw_number = raw.get("number")
+    if objective_number:
+        if isinstance(raw_number, bool) or not isinstance(raw_number, int) or raw_number != int(objective_number):
+            raise PlatformError("qN question.number must be the integer N")
+        if question_type in {"writing", "translation"}:
+            raise PlatformError("qN questions cannot use writing or translation type")
+        number: object = raw_number
+    else:
+        if question_type != long_type:
+            raise PlatformError(f"{question_id} must use type {long_type}")
+        if isinstance(raw_number, bool) or not isinstance(raw_number, (str, int)):
+            raise PlatformError("long-response question.number must be a short string or integer")
+        number = _review_text(str(raw_number), "question.number", 32, required=True)
+
+    raw_page = raw.get("page")
+    if isinstance(raw_page, bool) or not isinstance(raw_page, int):
+        raise PlatformError("question.page must be an integer")
+    dimensions = _review_page_dimensions(manifest)
+    if raw_page not in dimensions:
+        raise PlatformError("question.page is outside the paper manifest")
+    page_width, page_height = dimensions[raw_page]
+
+    raw_bbox = raw.get("bbox")
+    if not isinstance(raw_bbox, dict) or set(raw_bbox) != {"x", "y", "width", "height"}:
+        raise PlatformError("question.bbox must contain only x, y, width, and height")
+    try:
+        x, y, width, height = (float(raw_bbox[key]) for key in ("x", "y", "width", "height"))
+    except (TypeError, ValueError):
+        raise PlatformError("question.bbox values must be numbers")
+    if not all(math.isfinite(value) for value in (x, y, width, height)) or x < 0 or y < 0 or width <= 0 or height <= 0:
+        raise PlatformError("question.bbox must be a finite positive rectangle")
+    if x + width > page_width + 0.5 or y + height > page_height + 0.5:
+        raise PlatformError("question.bbox must stay within its manifest page")
+
+    # Listening questions in CET paper PDFs often print only the options; the
+    # spoken question stem exists in the audio, not on the page.  An empty stem
+    # is therefore valid for objective questions, but not for long responses.
+    stem = _review_text(
+        raw.get("stem"),
+        "question.stem",
+        12_000,
+        required=question_type in {"writing", "translation"},
+    )
+    raw_options = raw.get("options")
+    if not isinstance(raw_options, list) or len(raw_options) > 15:
+        raise PlatformError("question.options must be an array with at most 15 items")
+    options: list[dict[str, object]] = []
+    labels: set[str] = set()
+    for index, raw_option in enumerate(raw_options):
+        if not isinstance(raw_option, dict) or set(raw_option) != {"label", "text"}:
+            raise PlatformError(f"question.options[{index}] must contain only label and text")
+        label = _review_text(raw_option.get("label"), f"question.options[{index}].label", 1, required=True).upper()
+        if label not in "ABCDEFGHIJKLMNO" or label in labels:
+            raise PlatformError("question option labels must be unique letters A-O")
+        labels.add(label)
+        option_text = _review_text(raw_option.get("text"), f"question.options[{index}].text", 4_000)
+        option: dict[str, object] = {"label": label, "text": option_text}
+        if not option_text:
+            option["textMissing"] = True
+        options.append(option)
+    if question_type in {"single_choice", "matching"} and len(options) < 2:
+        raise PlatformError(f"{question_type} questions require at least two options")
+    if question_type in {"writing", "translation"} and options:
+        raise PlatformError(f"{question_type} questions cannot contain options")
+    if question_type == "unknown" and len(options) == 1:
+        raise PlatformError("unknown questions may not contain exactly one option")
+
+    options_incomplete = any(not str(option.get("text") or "").strip() for option in options)
+    # ``unknown`` is a deliberate unresolved state.  A human save must not
+    # accidentally promote it to a reliable, gradeable question merely
+    # because its option text happens to be complete.
+    unresolved_type = question_type == "unknown"
+    confidence = 0.79 if options_incomplete or unresolved_type else 1.0
+    status = _review_status(confidence)
+    normalized: dict[str, object] = {
+        "questionId": question_id,
+        "number": number,
+        "type": question_type,
+        "page": raw_page,
+        "bbox": {"x": round(x, 3), "y": round(y, 3), "width": round(width, 3), "height": round(height, 3)},
+        "stem": stem,
+        "options": options,
+        "optionsIncomplete": options_incomplete,
+        "confidence": confidence,
+        "reviewStatus": status,
+        "reviewLabel": REVIEW_LABELS[status],
+        "reviewRequired": options_incomplete or unresolved_type,
+        "source": "human_review",
+        "verification": {"method": "human", "actor": actor, "revision": revision, "reviewedAt": reviewed_at},
+    }
+    if existing and existing.get("section"):
+        normalized["section"] = str(existing["section"])[:160]
+    parser_confidence = existing.get("parserConfidence") if existing else None
+    if parser_confidence is None and existing and existing.get("source") != "human_review":
+        parser_confidence = existing.get("confidence")
+    if isinstance(parser_confidence, (int, float)) and not isinstance(parser_confidence, bool) and math.isfinite(float(parser_confidence)):
+        normalized["parserConfidence"] = round(max(0.0, min(1.0, float(parser_confidence))), 3)
+    return normalized
+
+
+def _normalize_review_answer(
+    raw: object,
+    questions: dict[str, dict[str, object]],
+    existing: dict[str, object] | None,
+    revision: int,
+    actor: str,
+    reviewed_at: str,
+) -> dict[str, object]:
+    if not isinstance(raw, dict):
+        raise PlatformError("upsertAnswer.answer must be an object")
+    allowed = {"questionId", "answer", "explanation"}
+    unknown = set(raw) - allowed
+    if unknown:
+        raise PlatformError(f"answer contains unsupported fields: {', '.join(sorted(unknown))}")
+    if not {"questionId", "answer"}.issubset(raw):
+        raise PlatformError("answer must contain questionId and answer")
+    question_id = _review_text(raw.get("questionId"), "answer.questionId", 32, required=True)
+    question = questions.get(question_id)
+    if not question:
+        raise PlatformError("answer.questionId does not exist in the reviewed paper")
+    if str(question.get("type")) not in {"single_choice", "matching"}:
+        raise PlatformError("only objective questions may receive an answer key")
+    answer = _review_text(raw.get("answer"), "answer.answer", 1, required=True).upper()
+    labels = {
+        str(option.get("label") or "").upper()
+        for option in question.get("options", [])
+        if isinstance(option, dict)
+    }
+    if answer not in labels:
+        raise PlatformError("answer.answer must match one of the reviewed question options")
+    explanation = _review_text(raw.get("explanation", ""), "answer.explanation", 12_000)
+    normalized: dict[str, object] = {
+        "questionId": question_id,
+        "answer": answer,
+        "explanation": explanation,
+        "confidence": 1.0,
+        "source": "human_review",
+        "reviewStatus": "reliable",
+        "reviewLabel": REVIEW_LABELS["reliable"],
+        "reviewRequired": False,
+        "verification": {"method": "human", "actor": actor, "revision": revision, "reviewedAt": reviewed_at},
+    }
+    if existing and isinstance(existing.get("page"), int):
+        normalized["page"] = existing["page"]
+    parser_confidence = existing.get("parserConfidence") if existing else None
+    if parser_confidence is None and existing and existing.get("source") != "human_review":
+        parser_confidence = existing.get("confidence")
+    if isinstance(parser_confidence, (int, float)) and not isinstance(parser_confidence, bool) and math.isfinite(float(parser_confidence)):
+        normalized["parserConfidence"] = round(max(0.0, min(1.0, float(parser_confidence))), 3)
+    return normalized
+
+
+def _review_issues(
+    questions_document: dict[str, object],
+    answers_document: dict[str, object],
+) -> list[dict[str, object]]:
+    issues: list[dict[str, object]] = []
+    seen: set[str] = set()
+
+    def append(issue_id: str, **values: object) -> None:
+        if issue_id in seen:
+            return
+        seen.add(issue_id)
+        issues.append({"issueId": issue_id, **values})
+
+    for unresolved in questions_document.get("unresolved", []):
+        if not isinstance(unresolved, dict):
+            continue
+        question_id = str(unresolved.get("questionId") or "unknown")
+        append(
+            f"missing-question:{question_id}",
+            kind="missing_question",
+            targetId=question_id,
+            message=str(unresolved.get("reason") or "题号存在缺口，需要人工补录")[:500],
+            severity="manualReview",
+        )
+    for question in questions_document.get("questions", []):
+        if not isinstance(question, dict) or not question.get("reviewRequired"):
+            continue
+        question_id = str(question.get("questionId") or "unknown")
+        append(
+            f"question-review:{question_id}",
+            kind="question_review",
+            targetId=question_id,
+            page=question.get("page"),
+            message=str(question.get("reviewReason") or "题目解析结果需要人工复核")[:500],
+            severity=str(question.get("reviewStatus") or "manualReview"),
+        )
+    for answer in answers_document.get("answers", []):
+        if not isinstance(answer, dict) or not answer.get("reviewRequired"):
+            continue
+        question_id = str(answer.get("questionId") or "unknown")
+        append(
+            f"answer-review:{question_id}",
+            kind="answer_review",
+            targetId=question_id,
+            page=answer.get("page"),
+            message="答案绑定需要人工复核",
+            severity=str(answer.get("reviewStatus") or "manualReview"),
+        )
+    for index, conflict in enumerate(answers_document.get("conflicts", [])):
+        if not isinstance(conflict, dict):
+            continue
+        question_id = str(conflict.get("questionId") or "unknown")
+        digest = hashlib.sha256(json.dumps(conflict, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:10]
+        append(
+            f"answer-conflict:{question_id}:{digest}",
+            kind="answer_conflict",
+            targetId=question_id,
+            message=str(conflict.get("reason") or f"第 {index + 1} 个答案冲突需要人工复核")[:500],
+            severity="manualReview",
+        )
+    return issues
+
+
+def _refresh_rag_answers(
+    source: Path,
+    destination: Path,
+    answers: list[dict[str, object]],
+    superseded_question_ids: set[str],
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if source.is_file():
+        shutil.copy2(str(source), str(destination))
+    else:
+        _build_index(destination, [], [])
+    connection = sqlite3.connect(str(destination))
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DELETE FROM chunks WHERE kind = 'official_answer'")
+        # Raw answer-page chunks are useful evidence until a human explicitly
+        # changes or removes that question's answer.  Keeping a superseded
+        # chunk would let the same revision claim both the old and new answer.
+        if superseded_question_ids:
+            placeholders = ",".join("?" for _ in superseded_question_ids)
+            connection.execute(
+                f"DELETE FROM chunks WHERE kind = 'answer_text' AND question_id IN ({placeholders})",
+                tuple(sorted(superseded_question_ids)),
+            )
+        for answer in answers:
+            provenance = "人工复核" if answer.get("source") == "human_review" else "上传答案资料"
+            content = f"{answer['questionId']} {provenance}给出的正确答案：{answer['answer']}。"
+            if answer.get("explanation"):
+                content += f" {provenance}中的解析：{answer['explanation']}"
+            connection.execute(
+                "INSERT INTO chunks(question_id, kind, content, embedding) VALUES (?, ?, ?, ?)",
+                (
+                    str(answer["questionId"]),
+                    "official_answer",
+                    content,
+                    json.dumps(_embedding(content), separators=(",", ":")),
+                ),
+            )
+        connection.commit()
+    except (OSError, sqlite3.Error) as error:
+        connection.rollback()
+        raise PlatformError(f"无法更新复核后的答案索引：{error}", HTTPStatus.INTERNAL_SERVER_ERROR)
+    finally:
+        connection.close()
 
 
 def _run(command: list[str], timeout: int, error_message: str) -> subprocess.CompletedProcess:
@@ -367,27 +722,165 @@ def _png_dimensions(path: Path) -> tuple[int, int]:
     return int.from_bytes(header[16:20], "big"), int.from_bytes(header[20:24], "big")
 
 
-def _tesseract_pages(pdf: Path, base_pages: list[dict[str, object]], work: Path) -> list[dict[str, object]]:
-    tesseract = shutil.which("tesseract")
+def _render_ocr_page_images(
+    pdf: Path,
+    base_pages: list[dict[str, object]],
+    work: Path,
+    stem: str,
+) -> list[Path]:
     pdftoppm = shutil.which("pdftoppm")
-    if not tesseract or not pdftoppm:
+    if not pdftoppm:
         raise PlatformError(
-            "扫描版 PDF 需要安装 OCRmyPDF，或同时安装 Tesseract 与 Poppler pdftoppm 后重试",
+            "扫描版 PDF 需要安装 Poppler pdftoppm 才能生成 OCR 页面图像",
             HTTPStatus.SERVICE_UNAVAILABLE,
         )
-    ocr_pages: list[dict[str, object]] = []
+    numbers = [int(page["number"]) for page in base_pages]
+    if not numbers:
+        return []
+    images: list[Path] = []
+    contiguous = sorted(numbers) == list(range(min(numbers), max(numbers) + 1))
+    if contiguous and len(numbers) > 1:
+        prefix = work / f"{stem}-batch"
+        _run(
+            [
+                pdftoppm,
+                "-f",
+                str(min(numbers)),
+                "-l",
+                str(max(numbers)),
+                "-png",
+                "-r",
+                "200",
+                str(pdf),
+                str(prefix),
+            ],
+            PDF_TIMEOUT_SECONDS,
+            "OCR 页面图像批量生成失败",
+        )
+        produced: dict[int, Path] = {}
+        pattern = re.compile(rf"^{re.escape(prefix.name)}-0*([1-9][0-9]*)\.png$")
+        for candidate in work.glob(f"{prefix.name}-*.png"):
+            match = pattern.fullmatch(candidate.name)
+            if match:
+                produced[int(match.group(1))] = candidate
+        for number in numbers:
+            image = produced.get(number)
+            if image is None:
+                raise PlatformError(f"第 {number} 页没有生成 OCR 图像", HTTPStatus.UNPROCESSABLE_ENTITY)
+            _png_dimensions(image)
+            images.append(image)
+        return images
     for page in base_pages:
         number = int(page["number"])
-        prefix = work / f"ocr-page-{number}"
+        prefix = work / f"{stem}-page-{number}"
         _run(
             [pdftoppm, "-f", str(number), "-l", str(number), "-singlefile", "-png", "-r", "200", str(pdf), str(prefix)],
             PDF_TIMEOUT_SECONDS,
             f"第 {number} 页 OCR 图像生成失败",
         )
         image = prefix.with_suffix(".png")
+        _png_dimensions(image)
+        images.append(image)
+    return images
+
+
+def _paddle_language() -> str:
+    language = os.environ.get("CET_PADDLEOCR_LANGUAGE", "en").strip() or "en"
+    if not re.fullmatch(r"[A-Za-z0-9_+-]{1,32}", language):
+        raise PlatformError("CET_PADDLEOCR_LANGUAGE 格式无效，应类似 en 或 ch")
+    return language
+
+
+def _paddleocr_pages(
+    pdf: Path,
+    base_pages: list[dict[str, object]],
+    work: Path,
+    stem: str,
+) -> list[dict[str, object]]:
+    client = PaddleOCRClient.from_environment()
+    if not client.configured:
+        raise PaddleOCRUnavailable("CET_PADDLEOCR_URL is not configured")
+    images = _render_ocr_page_images(pdf, base_pages, work, f"{stem}-paddleocr")
+    try:
+        return client.recognize_pages(images, base_pages, language=_paddle_language())
+    finally:
+        for image in images:
+            image.unlink(missing_ok=True)
+
+
+def _ocrmypdf_pages(
+    pdf: Path,
+    work: Path,
+    stem: str,
+    *,
+    skip_text: bool,
+) -> list[dict[str, object]]:
+    ocrmypdf = shutil.which("ocrmypdf")
+    if not ocrmypdf:
+        raise PlatformError("服务器未安装 OCRmyPDF", HTTPStatus.SERVICE_UNAVAILABLE)
+    searchable = work / f"{stem}-ocr.pdf"
+    command = [
+        ocrmypdf,
+        "--output-type",
+        "pdf",
+        "--language",
+        _ocr_languages(),
+    ]
+    if skip_text:
+        command.append("--skip-text")
+    # Do not deskew or rotate here.  The reader renders the original PDF, so
+    # transformed OCR coordinates would no longer align with its page image.
+    command.extend([str(pdf), str(searchable)])
+    _run(
+        command,
+        OCR_TIMEOUT_SECONDS,
+        "扫描版 PDF 的 OCRmyPDF 处理失败",
+    )
+    return _extract_bbox_pdf(searchable, work, f"{stem}-ocr-output")
+
+
+def _merge_ocr_replacements(
+    pages: list[dict[str, object]],
+    candidates: list[dict[str, object]],
+    target_numbers: set[int],
+) -> tuple[list[dict[str, object]], set[int]]:
+    base_by_number = {int(page["number"]): page for page in pages}
+    replacements: dict[int, dict[str, object]] = {}
+    for candidate in candidates:
+        number = int(candidate.get("number", 0))
+        base = base_by_number.get(number)
+        if not base or number not in target_numbers or _meaningful_word_count([candidate]) < 3:
+            continue
+        try:
+            same_geometry = (
+                abs(float(candidate["width"]) - float(base["width"])) <= 0.5
+                and abs(float(candidate["height"]) - float(base["height"])) <= 0.5
+            )
+        except (KeyError, TypeError, ValueError):
+            same_geometry = False
+        if same_geometry:
+            replacements[number] = candidate
+    return (
+        [replacements.get(int(page["number"]), page) for page in pages],
+        set(replacements),
+    )
+
+
+def _tesseract_pages(pdf: Path, base_pages: list[dict[str, object]], work: Path) -> list[dict[str, object]]:
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        raise PlatformError(
+            "扫描版 PDF 需要配置 PaddleOCR、安装 OCRmyPDF，或安装 Tesseract 后重试",
+            HTTPStatus.SERVICE_UNAVAILABLE,
+        )
+    images = _render_ocr_page_images(pdf, base_pages, work, "ocr")
+    ocr_pages: list[dict[str, object]] = []
+    languages = _ocr_languages()
+    for page, image in zip(base_pages, images):
+        number = int(page["number"])
         pixel_width, pixel_height = _png_dimensions(image)
         result = _run(
-            [tesseract, str(image), "stdout", "-l", _ocr_languages(), "tsv"],
+            [tesseract, str(image), "stdout", "-l", languages, "tsv"],
             OCR_TIMEOUT_SECONDS,
             f"第 {number} 页 Tesseract OCR 失败",
         )
@@ -435,39 +928,127 @@ def _extract_document(
     stem: str,
     on_ocr=None,
 ) -> tuple[list[dict[str, object]], str]:
-    pages = _extract_bbox_pdf(pdf, work, stem)
+    pages = [
+        {**page, "extractionSource": "pdf_text"}
+        for page in _extract_bbox_pdf(pdf, work, stem)
+    ]
     # A cover page or a short writing prompt may legitimately be sparse; use a
     # per-document threshold instead of requiring text on every page.
     threshold = max(8, len(pages) * 3)
-    if _meaningful_word_count(pages) >= threshold:
+    original_word_count = _meaningful_word_count(pages)
+    paddle_configuration_error = ""
+    try:
+        paddle_client = PaddleOCRClient.from_environment()
+    except PaddleOCRError as error:
+        paddle_client = PaddleOCRClient(endpoint="")
+        paddle_configuration_error = str(error)[:500]
+    sparse_pages = [
+        page
+        for page in pages
+        if _meaningful_word_count([page]) < 3
+    ]
+    if original_word_count >= threshold and not sparse_pages:
         return pages, "pdf_text"
 
     if on_ocr:
         on_ocr()
-    ocrmypdf = shutil.which("ocrmypdf")
-    if ocrmypdf:
-        searchable = work / f"{stem}-ocr.pdf"
-        _run(
-            [
-                ocrmypdf,
-                "--deskew",
-                "--rotate-pages",
-                "--output-type",
-                "pdf",
-                "--language",
-                _ocr_languages(),
-                str(pdf),
-                str(searchable),
-            ],
-            OCR_TIMEOUT_SECONDS,
-            "扫描版 PDF 的 OCRmyPDF 处理失败",
-        )
-        ocr_pages = _extract_bbox_pdf(searchable, work, f"{stem}-ocr-output")
-        if _meaningful_word_count(ocr_pages) < threshold:
-            raise PlatformError("OCR 已运行，但没有识别出足够文字；请上传更清晰的扫描件", HTTPStatus.UNPROCESSABLE_ENTITY)
-        return ocr_pages, "ocrmypdf"
+    paddle_error = paddle_configuration_error
+    used_engines: list[str] = []
+    if paddle_client.configured:
+        paddle_targets = sparse_pages if original_word_count >= threshold else pages
+        try:
+            paddle_pages = [
+                {**page, "extractionSource": "paddleocr"}
+                for page in _paddleocr_pages(pdf, paddle_targets, work, stem)
+            ]
+            if original_word_count >= threshold:
+                pages, replaced = _merge_ocr_replacements(
+                    pages,
+                    paddle_pages,
+                    {int(page["number"]) for page in sparse_pages},
+                )
+                if replaced:
+                    used_engines.append("paddleocr")
+                sparse_pages = [
+                    page for page in pages if _meaningful_word_count([page]) < 3
+                ]
+                if not sparse_pages:
+                    return pages, "pdf_text+" + "+".join(used_engines)
+            else:
+                if _meaningful_word_count(paddle_pages) >= threshold:
+                    return paddle_pages, "paddleocr"
+                paddle_error = "PaddleOCR 已运行，但没有识别出足够文字"
+        except PaddleOCRError as error:
+            paddle_error = str(error)[:500]
 
-    ocr_pages = _tesseract_pages(pdf, pages, work)
+    # Mixed PDFs keep native coordinates on text pages and continue through
+    # every installed fallback for only the still-sparse pages.  Blank cover
+    # pages are allowed to remain sparse after all engines have been tried.
+    if original_word_count >= threshold:
+        if sparse_pages and shutil.which("ocrmypdf"):
+            try:
+                ocr_pages = [
+                    {**page, "extractionSource": "ocrmypdf"}
+                    for page in _ocrmypdf_pages(pdf, work, f"{stem}-mixed", skip_text=True)
+                ]
+                pages, replaced = _merge_ocr_replacements(
+                    pages,
+                    ocr_pages,
+                    {int(page["number"]) for page in sparse_pages},
+                )
+                if replaced:
+                    used_engines.append("ocrmypdf")
+                sparse_pages = [
+                    page for page in pages if _meaningful_word_count([page]) < 3
+                ]
+            except PlatformError:
+                # Tesseract remains an independent fallback below.
+                pass
+        if sparse_pages and shutil.which("tesseract"):
+            try:
+                tesseract_pages = [
+                    {**page, "extractionSource": "tesseract"}
+                    for page in _tesseract_pages(pdf, sparse_pages, work)
+                ]
+                pages, replaced = _merge_ocr_replacements(
+                    pages,
+                    tesseract_pages,
+                    {int(page["number"]) for page in sparse_pages},
+                )
+                if replaced:
+                    used_engines.append("tesseract")
+            except PlatformError:
+                pass
+        return pages, "pdf_text" + ("+" + "+".join(used_engines) if used_engines else "")
+
+    fallback_errors: list[str] = []
+    if shutil.which("ocrmypdf"):
+        try:
+            ocr_pages = [
+                {**page, "extractionSource": "ocrmypdf"}
+                for page in _ocrmypdf_pages(pdf, work, stem, skip_text=False)
+            ]
+            if _meaningful_word_count(ocr_pages) >= threshold:
+                return ocr_pages, "ocrmypdf"
+            fallback_errors.append("OCRmyPDF 已运行，但没有识别出足够文字")
+        except PlatformError as error:
+            fallback_errors.append(error.message)
+
+    try:
+        ocr_pages = [
+            {**page, "extractionSource": "tesseract"}
+            for page in _tesseract_pages(pdf, pages, work)
+        ]
+    except PlatformError as error:
+        details = [message for message in [paddle_error, *fallback_errors, error.message] if message]
+        if paddle_error:
+            raise PlatformError(
+                "；".join(details),
+                error.status,
+            ) from error
+        if fallback_errors:
+            raise PlatformError("；".join(details), error.status) from error
+        raise
     if _meaningful_word_count(ocr_pages) < threshold:
         raise PlatformError("Tesseract 已运行，但没有识别出足够文字；请上传更清晰的扫描件", HTTPStatus.UNPROCESSABLE_ENTITY)
     return ocr_pages, "tesseract"
@@ -480,31 +1061,39 @@ def _render_page_images(pdf: Path, pages: list[dict[str, object]], destination: 
     temporary = destination.parent / f".{destination.name}-{uuid.uuid4().hex}"
     temporary.mkdir(parents=True, exist_ok=False)
     try:
-        for page in pages:
-            number = int(page["number"])
-            prefix = temporary / f"page-{number}"
-            _run(
-                [
-                    pdftoppm,
-                    "-f",
-                    str(number),
-                    "-l",
-                    str(number),
-                    "-singlefile",
-                    "-jpeg",
-                    "-r",
-                    "144",
-                    "-jpegopt",
-                    "quality=84,progressive=y,optimize=y",
-                    str(pdf),
-                    str(prefix),
-                ],
-                PDF_TIMEOUT_SECONDS,
-                f"第 {number} 页图片生成失败",
-            )
-            output = prefix.with_suffix(".jpg")
-            if not output.is_file() or output.stat().st_size < 256:
+        numbers = [int(page["number"]) for page in pages]
+        if not numbers or sorted(numbers) != list(range(1, max(numbers) + 1)):
+            raise PlatformError("PDF 页面编号不连续，无法安全生成页面图片", HTTPStatus.UNPROCESSABLE_ENTITY)
+        prefix = temporary / "render"
+        _run(
+            [
+                pdftoppm,
+                "-f",
+                "1",
+                "-l",
+                str(max(numbers)),
+                "-jpeg",
+                "-r",
+                "144",
+                "-jpegopt",
+                "quality=84,progressive=y,optimize=y",
+                str(pdf),
+                str(prefix),
+            ],
+            PDF_TIMEOUT_SECONDS,
+            "PDF 页面图片批量生成失败",
+        )
+        pattern = re.compile(r"^render-0*([1-9][0-9]*)\.jpg$")
+        produced: dict[int, Path] = {}
+        for candidate in temporary.glob("render-*.jpg"):
+            match = pattern.fullmatch(candidate.name)
+            if match:
+                produced[int(match.group(1))] = candidate
+        for number in numbers:
+            output = produced.get(number)
+            if output is None or not output.is_file() or output.stat().st_size < 256:
                 raise PlatformError(f"第 {number} 页没有生成有效图片", HTTPStatus.UNPROCESSABLE_ENTITY)
+            output.rename(temporary / f"page-{number}.jpg")
         os.replace(str(temporary), str(destination))
     finally:
         if temporary.exists():
@@ -534,6 +1123,7 @@ def _page_lines(pages: list[dict[str, object]]) -> list[dict[str, object]]:
                 {
                     "page": int(page["number"]),
                     "line": line_number,
+                    "extractionSource": str(page.get("extractionSource") or "pdf_text"),
                     "text": text,
                     "bbox": {
                         "x": round(left, 3),
@@ -677,7 +1267,11 @@ def _question_candidate(block: list[dict[str, object]], source_kind: str) -> dic
         # Keep an explicit numbered statement as an unclassified question so
         # matching items are not silently lost, but require human review.
         confidence = 0.76
-    if source_kind != "pdf_text":
+    candidate_uses_ocr = any(
+        str(line.get("extractionSource") or source_kind) != "pdf_text"
+        for line in used_lines
+    )
+    if candidate_uses_ocr:
         confidence -= 0.10
     if options_incomplete:
         confidence = min(confidence, 0.79)
@@ -853,7 +1447,11 @@ def _extract_long_response_tasks(
             continue
         page = int(block[0]["page"])
         prompt_on_page = [line for line in prompt_lines if int(line["page"]) == page]
-        confidence = 0.96 if source_kind == "pdf_text" else 0.86
+        prompt_uses_ocr = any(
+            str(line.get("extractionSource") or source_kind) != "pdf_text"
+            for line in prompt_lines
+        )
+        confidence = 0.86 if prompt_uses_ocr else 0.96
         status = _review_status(confidence)
         tasks.append(
             {
@@ -946,11 +1544,11 @@ def _text_quality(text: str) -> float:
     return max(0.0, min(1.0, printable / len(text) - (replacement + controls) / max(1, len(text)) * 4))
 
 
-def _answer_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
+def _answer_lines(pages: list[dict[str, object]]) -> list[tuple[int, str, str]]:
     """Return reading order that respects two-column answer-booklet bands."""
 
     all_lines = _page_lines(pages)
-    ordered: list[tuple[int, str]] = []
+    ordered: list[tuple[int, str, str]] = []
     for page in pages:
         page_number = int(page["number"])
         page_width = float(page["width"])
@@ -982,14 +1580,14 @@ def _answer_lines(pages: list[dict[str, object]]) -> list[tuple[int, str]]:
             ):
                 text = str(line["text"]).strip()
                 if text:
-                    ordered.append((page_number, text))
+                    ordered.append((page_number, text, str(line.get("extractionSource") or "pdf_text")))
 
         for separator in full_width:
             y = float(separator["bbox"]["y"])
             emit_band(y)
             text = str(separator["text"]).strip()
             if text:
-                ordered.append((page_number, text))
+                ordered.append((page_number, text, str(separator.get("extractionSource") or "pdf_text")))
             lower = y
         emit_band(float("inf"))
     return ordered
@@ -1013,7 +1611,15 @@ def _extract_answers(
         for item in questions
     }
 
-    def add(number: int, answer: str, page: int, explanation: str, confidence: float, pattern: str) -> None:
+    def add(
+        number: int,
+        answer: str,
+        page: int,
+        explanation: str,
+        confidence: float,
+        pattern: str,
+        extraction_source: str,
+    ) -> None:
         question_id = f"q{number}"
         if question_ids and question_id not in question_ids:
             return
@@ -1021,7 +1627,7 @@ def _extract_answers(
             return
         quality = _text_quality(explanation)
         clean_explanation = explanation.strip()[:12_000] if quality >= 0.72 and len(explanation.strip()) >= 8 else ""
-        adjusted = confidence - (0.10 if source_kind != "pdf_text" else 0.0)
+        adjusted = confidence - (0.10 if extraction_source != "pdf_text" else 0.0)
         parsed_options = question_options.get(question_id, set())
         if parsed_options and answer not in parsed_options:
             rejected_markers.append(
@@ -1048,47 +1654,47 @@ def _extract_answers(
             }
         )
 
-    for page, text in lines:
+    for page, text, extraction_source in lines:
         range_match = ANSWER_RANGE.search(text)
         if range_match and range_match.start() <= 4:
             first, last = int(range_match.group(1)), int(range_match.group(2))
             letters = re.findall(r"[A-O]", range_match.group(3).upper())
             if last >= first and len(letters) == last - first + 1:
                 for offset, letter in enumerate(letters):
-                    add(first + offset, letter, page, "", 0.95, "explicit_range")
+                    add(first + offset, letter, page, "", 0.95, "explicit_range", extraction_source)
         for match in INDIVIDUAL_ANSWER.finditer(text):
             if text[: match.start()].strip():
                 continue
             number = int(match.group(1))
             answer = match.group(2).upper()
             explanation = text[match.end() :].lstrip(" ,，。;；:：-")
-            add(number, answer, page, explanation, 0.98, "explicit_individual")
+            add(number, answer, page, explanation, 0.98, "explicit_individual", extraction_source)
 
     # After coordinate-aware column ordering, accept a single explicit option
     # label within five lines of its numbered question.  If another question or
     # a section boundary appears first, no association is made.  This is less
     # complete than positional guessing but prevents shifted "official" keys.
     boundary = re.compile(r"^\s*(?:part|section|questions?\s+[1-9])\b", re.I)
-    for index, (page, text) in enumerate(lines):
+    for index, (page, text, extraction_source) in enumerate(lines):
         question_match = QUESTION_START.match(text)
         if not question_match:
             continue
         number = int(question_match.group(1))
-        found: list[tuple[str, int, str]] = []
-        for following_page, following_text in lines[index + 1 : index + 9]:
+        found: list[tuple[str, int, str, str]] = []
+        for following_page, following_text, following_source in lines[index + 1 : index + 9]:
             if QUESTION_START.match(following_text) or boundary.search(following_text):
                 break
             option_match = re.match(r"^\s*([A-O])\s*[)）.、]\s*(.*)$", following_text, re.I)
             if option_match:
-                found.append((option_match.group(1).upper(), following_page, option_match.group(2).strip()))
+                found.append((option_match.group(1).upper(), following_page, option_match.group(2).strip(), following_source))
                 continue
             trailing_match = re.search(r"\b([A-O])\s*[)）]\s*(?:[oO。.]\s*)?$", following_text, re.I)
             if trailing_match:
-                found.append((trailing_match.group(1).upper(), following_page, following_text.strip()))
+                found.append((trailing_match.group(1).upper(), following_page, following_text.strip(), following_source))
         labels = {item[0] for item in found}
         if len(labels) == 1:
-            label, answer_page, explanation = found[0]
-            add(number, label, answer_page, explanation, 0.93, "numbered_explanation_option")
+            label, answer_page, explanation, answer_source = found[0]
+            add(number, label, answer_page, explanation, 0.93, "numbered_explanation_option", answer_source)
 
     answers: list[dict[str, object]] = []
     conflicts: list[dict[str, object]] = list(rejected_markers)
@@ -1142,7 +1748,7 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def _chunk_answer_pages(pages: list[dict[str, object]]) -> list[dict[str, str]]:
     chunks: list[dict[str, str]] = []
-    for page, text in _answer_lines(pages):
+    for page, text, _extraction_source in _answer_lines(pages):
         if not text or _text_quality(text) < 0.70:
             continue
         match = re.search(r"(?:第\s*)?([1-9][0-9]{0,2})\s*(?:题|[.、)])", text, re.I)
@@ -1211,6 +1817,57 @@ class PlatformService:
     def _status_path(self, exam_id: str) -> Path:
         return _safe_exam_directory(exam_id) / "status.json"
 
+    def _current_review_snapshot(self, exam_id: str) -> tuple[Path, int, dict[str, object]]:
+        directory = _safe_exam_directory(exam_id)
+        pointer_path = directory / "review" / "current.json"
+        if not pointer_path.exists():
+            return directory, 0, {}
+        if not pointer_path.is_file():
+            raise PlatformError("review snapshot metadata is invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+        pointer = _read_json(pointer_path)
+        if not isinstance(pointer, dict):
+            raise PlatformError("review snapshot metadata is invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+        revision = pointer.get("revision")
+        revision_directory = str(pointer.get("directory") or "")
+        if (
+            isinstance(revision, bool)
+            or not isinstance(revision, int)
+            or not 1 <= revision <= 999_999
+            or revision_directory != f"{revision:06d}"
+            or not SAFE_REVIEW_REVISION_DIRECTORY.fullmatch(revision_directory)
+        ):
+            raise PlatformError("review snapshot metadata is invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+        revisions = (directory / "review" / "revisions").resolve()
+        snapshot = (revisions / revision_directory).resolve()
+        if snapshot.parent != revisions or not snapshot.is_dir():
+            raise PlatformError("review snapshot is missing", HTTPStatus.INTERNAL_SERVER_ERROR)
+        if not (snapshot / "questions.json").is_file() or not (snapshot / "answers.json").is_file():
+            raise PlatformError("review snapshot documents are incomplete", HTTPStatus.INTERNAL_SERVER_ERROR)
+        if pointer.get("schemaVersion") != "cet-review-pointer/1":
+            raise PlatformError("review snapshot metadata is invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+        questions = _read_json(snapshot / "questions.json")
+        answers = _read_json(snapshot / "answers.json")
+        expected_questions_hash = str(pointer.get("questionsSha256") or "")
+        expected_answers_hash = str(pointer.get("answersSha256") or "")
+        if (
+            not isinstance(questions, dict)
+            or not isinstance(answers, dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_questions_hash)
+            or not re.fullmatch(r"[0-9a-f]{64}", expected_answers_hash)
+            or _review_document_digest(questions) != expected_questions_hash
+            or _review_document_digest(answers) != expected_answers_hash
+        ):
+            raise PlatformError("review snapshot integrity check failed", HTTPStatus.INTERNAL_SERVER_ERROR)
+        return snapshot, revision, pointer
+
+    @staticmethod
+    def _snapshot_documents(snapshot: Path) -> tuple[dict[str, object], dict[str, object]]:
+        questions = _read_json(snapshot / "questions.json")
+        answers = _read_json(snapshot / "answers.json")
+        if not isinstance(questions, dict) or not isinstance(answers, dict):
+            raise PlatformError("exam review documents are unavailable", HTTPStatus.CONFLICT)
+        return questions, answers
+
     def _set_status(
         self,
         exam_id: str,
@@ -1276,6 +1933,412 @@ class PlatformService:
             )
         exams.sort(key=lambda item: str(item.get("createdAt") or ""), reverse=True)
         return {"exams": exams}
+
+    def capabilities(self) -> dict[str, object]:
+        """Report installed document tools without exposing paths or secrets."""
+
+        commands = {
+            "pdftotext": bool(shutil.which("pdftotext")),
+            "pdftoppm": bool(shutil.which("pdftoppm")),
+            "ocrmypdf": bool(shutil.which("ocrmypdf")),
+            "tesseract": bool(shutil.which("tesseract")),
+        }
+        paddle: dict[str, object] = {
+            "configured": False,
+            "reachable": False,
+            "ready": False,
+            "modelLoaded": False,
+            "language": None,
+            "message": "未配置 PaddleOCR sidecar",
+        }
+        try:
+            client = PaddleOCRClient.from_environment()
+            paddle["configured"] = client.configured
+            if client.configured:
+                health = client.health(timeout_seconds=1.5)
+                paddle.update(
+                    {
+                        "reachable": True,
+                        "ready": bool(health.get("ready")),
+                        "modelLoaded": bool(health.get("modelLoaded")),
+                        "language": str(health.get("requestedLanguage") or _paddle_language()),
+                        "languageReady": bool(health.get("languageReady")),
+                        "allowedRootReady": bool(health.get("allowedRootReady")),
+                        "runtimeImportReady": bool(health.get("runtimeImportReady")),
+                        "message": (
+                            "PaddleOCR sidecar 可用"
+                            if health.get("ready")
+                            else "PaddleOCR 可连接，但运行环境、共享目录或语言尚未就绪"
+                        ),
+                    }
+                )
+        except PaddleOCRError:
+            if paddle["configured"]:
+                paddle["message"] = "PaddleOCR 已配置但当前不可连接"
+            else:
+                paddle["message"] = "PaddleOCR 配置无效"
+        native_pdf = commands["pdftotext"] and commands["pdftoppm"]
+        tesseract_ready = commands["tesseract"] and commands["pdftoppm"]
+        scanned_pdf = bool(native_pdf and (paddle["ready"] or commands["ocrmypdf"] or tesseract_ready))
+        return {
+            "schemaVersion": 1,
+            "pdf": {
+                "nativeText": native_pdf,
+                "pageRendering": commands["pdftoppm"],
+                "scanned": scanned_pdf,
+            },
+            "ocr": {
+                "preferred": "paddleocr" if paddle["ready"] else (
+                    "ocrmypdf" if commands["ocrmypdf"] else ("tesseract" if tesseract_ready else None)
+                ),
+                "paddleocr": paddle,
+                "ocrmypdf": commands["ocrmypdf"],
+                "tesseract": tesseract_ready,
+                "tesseractLanguages": _ocr_languages() if commands["tesseract"] else None,
+            },
+        }
+
+    def review(self, exam_id: str) -> dict[str, object]:
+        with self._lock:
+            status = self.status(exam_id)
+            if status.get("status") != "ready":
+                raise PlatformError("exam review is available only after parsing is ready", HTTPStatus.CONFLICT)
+            snapshot, revision, pointer = self._current_review_snapshot(exam_id)
+            questions_document, answers_document = self._snapshot_documents(snapshot)
+            questions = questions_document.get("questions", [])
+            answers = answers_document.get("answers", [])
+            if not isinstance(questions, list) or not isinstance(answers, list):
+                raise PlatformError("exam review documents are invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+            issues = _review_issues(questions_document, answers_document)
+            return {
+                "schemaVersion": "cet-review/1",
+                "examId": exam_id,
+                "revision": revision,
+                "etag": _review_etag(revision),
+                "state": "needs_review" if issues else "reviewed",
+                "updatedAt": str(pointer.get("updatedAt") or status.get("updatedAt") or _now()),
+                "questions": questions,
+                "answers": answers,
+                "issues": issues,
+                "reviewSummary": {
+                    "questions": questions_document.get("reviewSummary", _review_summary(questions)),
+                    "answers": answers_document.get("reviewSummary", _review_summary(answers)),
+                    "openIssues": len(issues),
+                },
+                "answerOfficialSource": bool(answers_document.get("officialSource")),
+            }
+
+    def apply_review_patch(
+        self,
+        exam_id: str,
+        payload: dict[str, object],
+        expected_revision: int,
+        actor: str = "local-reviewer",
+    ) -> dict[str, object]:
+        with self._lock:
+            actor = _review_text(str(actor), "actor", 160, required=True)
+            status = self.status(exam_id)
+            if status.get("status") != "ready":
+                raise PlatformError("only ready exams may be reviewed", HTTPStatus.CONFLICT)
+            snapshot, current_revision, _ = self._current_review_snapshot(exam_id)
+            if current_revision != expected_revision:
+                raise PlatformError(
+                    f"review revision changed; current revision is {current_revision}",
+                    HTTPStatus.CONFLICT,
+                )
+            if set(payload) != {"schemaVersion", "baseRevision", "reason", "operations"}:
+                raise PlatformError("review patch must contain only schemaVersion, baseRevision, reason, and operations")
+            if payload.get("schemaVersion") != "cet-review/1":
+                raise PlatformError("unsupported review schemaVersion")
+            base_revision = payload.get("baseRevision")
+            if isinstance(base_revision, bool) or not isinstance(base_revision, int):
+                raise PlatformError("baseRevision must be an integer")
+            if base_revision != current_revision:
+                raise PlatformError(
+                    f"review revision changed; current revision is {current_revision}",
+                    HTTPStatus.CONFLICT,
+                )
+            reason = _review_text(payload.get("reason"), "reason", MAX_REVIEW_REASON_CHARS, required=True)
+            operations = payload.get("operations")
+            if not isinstance(operations, list) or not operations or len(operations) > MAX_REVIEW_OPERATIONS:
+                raise PlatformError(f"operations must contain 1 to {MAX_REVIEW_OPERATIONS} items")
+            exam_directory = _safe_exam_directory(exam_id)
+            review_root = exam_directory / "review"
+            revisions = review_root / "revisions"
+            next_revision = current_revision + 1
+            # A crash can leave a fully written snapshot that was never made
+            # current.  Preserve that forensic data and advance to the next
+            # free immutable directory instead of permanently blocking edits.
+            while next_revision <= 999_999 and (revisions / f"{next_revision:06d}").exists():
+                next_revision += 1
+            if next_revision > 999_999:
+                raise PlatformError("review revision limit reached", HTTPStatus.CONFLICT)
+
+            questions_document, answers_document = self._snapshot_documents(snapshot)
+            # JSON round-tripping provides a bounded, plain-data clone and keeps
+            # a failed validation from mutating the currently published version.
+            questions_document = json.loads(json.dumps(questions_document, ensure_ascii=False))
+            answers_document = json.loads(json.dumps(answers_document, ensure_ascii=False))
+            question_items = questions_document.get("questions", [])
+            answer_items = answers_document.get("answers", [])
+            if not isinstance(question_items, list) or not isinstance(answer_items, list):
+                raise PlatformError("exam review documents are invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+            questions_by_id = {
+                str(item.get("questionId")): item
+                for item in question_items
+                if isinstance(item, dict) and item.get("questionId")
+            }
+            answers_by_id = {
+                str(item.get("questionId")): item
+                for item in answer_items
+                if isinstance(item, dict) and item.get("questionId")
+            }
+            if len(questions_by_id) != len(question_items) or len(answers_by_id) != len(answer_items):
+                raise PlatformError("exam review documents contain invalid or duplicate ids", HTTPStatus.INTERNAL_SERVER_ERROR)
+            manifest = _read_json(_safe_exam_directory(exam_id) / "manifest.json")
+            if not isinstance(manifest, dict) or not _review_page_dimensions(manifest):
+                raise PlatformError("paper manifest is unavailable", HTTPStatus.CONFLICT)
+
+            question_operations: list[tuple[str, dict[str, object]]] = []
+            answer_operations: list[tuple[str, dict[str, object]]] = []
+            question_targets: set[str] = set()
+            answer_targets: set[str] = set()
+            pending_answer_removals: set[str] = set()
+            for index, raw_operation in enumerate(operations):
+                if not isinstance(raw_operation, dict):
+                    raise PlatformError(f"operations[{index}] must be an object")
+                operation = raw_operation.get("op")
+                if operation == "upsertQuestion":
+                    if set(raw_operation) != {"op", "question"} or not isinstance(raw_operation.get("question"), dict):
+                        raise PlatformError(f"operations[{index}] upsertQuestion must contain only op and question")
+                    target = str(raw_operation["question"].get("questionId") or "")
+                    bucket = question_operations
+                elif operation == "removeQuestion":
+                    if set(raw_operation) - {"op", "questionId", "cascadeAnswer"} or "questionId" not in raw_operation:
+                        raise PlatformError(f"operations[{index}] removeQuestion fields are invalid")
+                    if "cascadeAnswer" in raw_operation and not isinstance(raw_operation["cascadeAnswer"], bool):
+                        raise PlatformError(f"operations[{index}].cascadeAnswer must be boolean")
+                    target = str(raw_operation.get("questionId") or "")
+                    bucket = question_operations
+                elif operation == "upsertAnswer":
+                    if set(raw_operation) != {"op", "answer"} or not isinstance(raw_operation.get("answer"), dict):
+                        raise PlatformError(f"operations[{index}] upsertAnswer must contain only op and answer")
+                    target = str(raw_operation["answer"].get("questionId") or "")
+                    bucket = answer_operations
+                elif operation == "removeAnswer":
+                    if set(raw_operation) != {"op", "questionId"}:
+                        raise PlatformError(f"operations[{index}] removeAnswer must contain only op and questionId")
+                    target = str(raw_operation.get("questionId") or "")
+                    bucket = answer_operations
+                    pending_answer_removals.add(target)
+                else:
+                    raise PlatformError(f"operations[{index}].op is unsupported")
+                if not SAFE_QUESTION_ID.fullmatch(target):
+                    raise PlatformError(f"operations[{index}] contains an invalid questionId")
+                targets = question_targets if bucket is question_operations else answer_targets
+                if target in targets:
+                    raise PlatformError(f"operations contains more than one change for {target}")
+                targets.add(target)
+                bucket.append((str(operation), raw_operation))
+
+            reviewed_at = _now()
+            cascaded_answers: set[str] = set()
+            removed_questions: set[str] = set()
+            for operation, raw_operation in question_operations:
+                if operation == "upsertQuestion":
+                    raw_question = raw_operation["question"]
+                    target = str(raw_question["questionId"])
+                    questions_by_id[target] = _normalize_review_question(
+                        raw_question,
+                        manifest,
+                        questions_by_id.get(target),
+                        next_revision,
+                        actor,
+                        reviewed_at,
+                    )
+                    continue
+                target = str(raw_operation["questionId"])
+                if target not in questions_by_id:
+                    raise PlatformError(f"cannot remove unknown question {target}")
+                removed_questions.add(target)
+                if target in answers_by_id and target not in pending_answer_removals:
+                    if raw_operation.get("cascadeAnswer") is not True:
+                        raise PlatformError(
+                            f"question {target} has an answer; remove it explicitly or set cascadeAnswer",
+                            HTTPStatus.CONFLICT,
+                        )
+                    cascaded_answers.add(target)
+                del questions_by_id[target]
+            if not questions_by_id:
+                raise PlatformError("a reviewed paper must retain at least one question")
+
+            touched_answers = set(cascaded_answers)
+            for target in cascaded_answers:
+                answers_by_id.pop(target, None)
+            for operation, raw_operation in answer_operations:
+                if operation == "upsertAnswer":
+                    raw_answer = raw_operation["answer"]
+                    target = str(raw_answer["questionId"])
+                    answers_by_id[target] = _normalize_review_answer(
+                        raw_answer,
+                        questions_by_id,
+                        answers_by_id.get(target),
+                        next_revision,
+                        actor,
+                        reviewed_at,
+                    )
+                else:
+                    target = str(raw_operation["questionId"])
+                    if target not in answers_by_id:
+                        raise PlatformError(f"cannot remove unknown answer {target}")
+                    del answers_by_id[target]
+                touched_answers.add(target)
+
+            # Existing parser answers must remain compatible with the final
+            # question set.  A question option edit cannot silently invalidate
+            # a previously published grading key.
+            for question_id, answer in answers_by_id.items():
+                question = questions_by_id.get(question_id)
+                if not question:
+                    raise PlatformError(f"answer {question_id} has no corresponding question")
+                if str(question.get("type") or "") not in {"single_choice", "matching"}:
+                    raise PlatformError(
+                        f"answer {question_id} belongs to a non-objective question; remove it in the same patch"
+                    )
+                labels = {
+                    str(option.get("label") or "").upper()
+                    for option in question.get("options", [])
+                    if isinstance(option, dict)
+                }
+                if str(answer.get("answer") or "").upper() not in labels:
+                    raise PlatformError(
+                        f"answer {question_id} no longer matches its options; update or remove the answer in the same patch"
+                    )
+
+            def question_sort(item: dict[str, object]) -> tuple[int, int, str]:
+                match = re.fullmatch(r"q([1-9][0-9]{0,2})", str(item.get("questionId") or ""))
+                return (0, int(match.group(1)), "") if match else (1, 0, str(item.get("questionId") or ""))
+
+            next_questions = sorted(questions_by_id.values(), key=question_sort)
+            next_answers = sorted(
+                answers_by_id.values(),
+                key=lambda item: question_sort({"questionId": item.get("questionId")}),
+            )
+            questions_document.update(
+                {
+                    "schemaVersion": 1,
+                    "revision": next_revision,
+                    "updatedAt": reviewed_at,
+                    "questions": next_questions,
+                    "unresolved": _unresolved_question_gaps(next_questions),
+                    "reviewSummary": _review_summary(next_questions),
+                }
+            )
+            questions_document["reviewSummary"]["unresolved"] = len(questions_document["unresolved"])
+            resolved_conflicts = touched_answers | removed_questions
+            conflicts = [
+                conflict
+                for conflict in answers_document.get("conflicts", [])
+                if isinstance(conflict, dict) and str(conflict.get("questionId") or "") not in resolved_conflicts
+            ]
+            answers_document.update(
+                {
+                    "schemaVersion": 1,
+                    "revision": next_revision,
+                    "updatedAt": reviewed_at,
+                    "answers": next_answers,
+                    "conflicts": conflicts,
+                    "reviewSummary": _review_summary(next_answers),
+                }
+            )
+
+            before_hashes = {
+                "questions": _review_document_digest(self._snapshot_documents(snapshot)[0]),
+                "answers": _review_document_digest(self._snapshot_documents(snapshot)[1]),
+            }
+            after_hashes = {
+                "questions": _review_document_digest(questions_document),
+                "answers": _review_document_digest(answers_document),
+            }
+            audit_operations = []
+            for operation, raw_operation in [*question_operations, *answer_operations]:
+                item = raw_operation.get("question") or raw_operation.get("answer") or raw_operation
+                audit_operations.append({"op": operation, "questionId": str(item.get("questionId") or "")})
+            audit = {
+                "schemaVersion": "cet-review-audit/1",
+                "examId": exam_id,
+                "revision": next_revision,
+                "baseRevision": current_revision,
+                "actor": actor,
+                "createdAt": reviewed_at,
+                "reason": reason,
+                "operations": audit_operations,
+                "beforeSha256": before_hashes,
+                "afterSha256": after_hashes,
+            }
+
+            revisions.mkdir(parents=True, exist_ok=True)
+            final_snapshot = revisions / f"{next_revision:06d}"
+            if final_snapshot.exists():
+                raise PlatformError("review revision already exists", HTTPStatus.CONFLICT)
+            temporary = revisions / f".pending-{uuid.uuid4().hex}"
+            temporary.mkdir(parents=False, exist_ok=False)
+            installed_snapshot = False
+            committed_pointer = False
+            try:
+                _atomic_json(temporary / "questions.json", questions_document)
+                _atomic_json(temporary / "answers.json", answers_document)
+                _refresh_rag_answers(
+                    snapshot / "rag.sqlite3",
+                    temporary / "rag.sqlite3",
+                    next_answers,
+                    touched_answers | removed_questions,
+                )
+                _atomic_json(temporary / "audit.json", audit)
+                os.replace(str(temporary), str(final_snapshot))
+                installed_snapshot = True
+                pointer = {
+                    "schemaVersion": "cet-review-pointer/1",
+                    "revision": next_revision,
+                    "directory": f"{next_revision:06d}",
+                    "updatedAt": reviewed_at,
+                    "questionsSha256": after_hashes["questions"],
+                    "answersSha256": after_hashes["answers"],
+                }
+                _atomic_json(review_root / "current.json", pointer)
+                committed_pointer = True
+            finally:
+                if temporary.exists():
+                    shutil.rmtree(str(temporary), ignore_errors=True)
+                if installed_snapshot and not committed_pointer and final_snapshot.exists():
+                    shutil.rmtree(str(final_snapshot), ignore_errors=True)
+
+            # Keep the upload dashboard in sync with the published snapshot.
+            # The immutable snapshot and current pointer remain the source of
+            # truth; a status refresh failure must not make a committed review
+            # appear to have failed and invite a duplicate retry.
+            try:
+                status_document = dict(status)
+                status_result = status_document.get("result")
+                status_result = dict(status_result) if isinstance(status_result, dict) else {}
+                status_result["reviewCounts"] = {
+                    "questions": questions_document["reviewSummary"],
+                    "answers": answers_document["reviewSummary"],
+                    "answerConflicts": len(conflicts),
+                }
+                status_result["reviewRevision"] = next_revision
+                status_document["result"] = status_result
+                status_document["updatedAt"] = reviewed_at
+                _atomic_json(self._status_path(exam_id), status_document)
+            except OSError:
+                pass
+
+            response = self.review(exam_id)
+            response["documents"] = {
+                "questionsUrl": f"/api/exams/{exam_id}/questions",
+                "answersUrl": f"/api/exams/{exam_id}/answers",
+            }
+            return response
 
     def create_from_multipart(self, handler) -> dict[str, object]:
         content_type = handler.headers.get("Content-Type", "")
@@ -1417,9 +2480,30 @@ class PlatformService:
                             "width": page["width"],
                             "height": page["height"],
                             "image": f"/api/exams/{exam_id}/assets/pages/page-{number}.jpg",
+                            "textSource": str(page.get("extractionSource") or "pdf_text"),
                             "words": page.get("words", []),
                         }
                     )
+                unresolved_text_pages = [
+                    int(page["number"])
+                    for page in paper_pages
+                    if _meaningful_word_count([page]) < 3
+                ]
+                ocr_languages = (
+                    _paddle_language()
+                    if "paddleocr" in paper_source
+                    else (_ocr_languages() if paper_source != "pdf_text" else None)
+                )
+                if unresolved_text_pages:
+                    listed_pages = "、".join(str(number) for number in unresolved_text_pages[:12])
+                    ocr_notice = f"第 {listed_pages} 页没有识别到足够文字；可能是空白页，也可能需要人工复核或更清晰的扫描件"
+                elif (
+                    ("paddleocr" in paper_source and ocr_languages != "ch")
+                    or ("paddleocr" not in paper_source and paper_source != "pdf_text" and "chi_sim" not in str(ocr_languages or ""))
+                ):
+                    ocr_notice = "当前 OCR 仅有英文语言包；答案中的中文解析质量可能下降，低质量内容不会被当作可靠解析"
+                else:
+                    ocr_notice = None
                 manifest: dict[str, object] = {
                     "id": exam_id,
                     "title": str(metadata.get("title") or "未命名英语试卷"),
@@ -1428,14 +2512,11 @@ class PlatformService:
                     "pages": manifest_pages,
                     "extraction": {
                         "engine": paper_source,
-                        "hadTextLayer": paper_source == "pdf_text",
+                        "hadTextLayer": paper_source.startswith("pdf_text"),
                         "wordCount": _meaningful_word_count(paper_pages),
-                        "ocrLanguages": _ocr_languages() if paper_source != "pdf_text" else None,
-                        "ocrNotice": (
-                            None
-                            if paper_source == "pdf_text" or "chi_sim" in _ocr_languages()
-                            else "当前 OCR 仅有英文语言包；答案中的中文解析质量可能下降，低质量内容不会被当作可靠解析"
-                        ),
+                        "ocrLanguages": ocr_languages,
+                        "unresolvedTextPages": unresolved_text_pages,
+                        "ocrNotice": ocr_notice,
                     },
                 }
                 _atomic_json(directory / "manifest.json", manifest)
@@ -1508,17 +2589,27 @@ class PlatformService:
             traceback.print_exc()
             self._set_status(exam_id, status="failed", stage="failed", progress=100, message="试卷解析失败", error="服务器处理试卷时发生内部错误")
 
-    def document(self, exam_id: str, name: str) -> dict[str, object]:
+    def document_with_revision(self, exam_id: str, name: str) -> tuple[dict[str, object], int]:
         if name not in {"manifest", "questions", "answers"}:
             raise PlatformError("document not found", HTTPStatus.NOT_FOUND)
-        directory = _safe_exam_directory(exam_id)
-        document = _read_json(directory / f"{name}.json")
-        if not isinstance(document, dict):
-            status = self.status(exam_id)
-            if status.get("status") == "failed":
-                raise PlatformError(str(status.get("error") or "exam parsing failed"), HTTPStatus.UNPROCESSABLE_ENTITY)
-            raise PlatformError("exam document is not ready", HTTPStatus.CONFLICT)
-        return document
+        with self._lock:
+            directory = _safe_exam_directory(exam_id)
+            revision = 0
+            if name in {"questions", "answers"}:
+                snapshot, revision, _ = self._current_review_snapshot(exam_id)
+                path = snapshot / f"{name}.json"
+            else:
+                path = directory / f"{name}.json"
+            document = _read_json(path)
+            if not isinstance(document, dict):
+                status = self.status(exam_id)
+                if status.get("status") == "failed":
+                    raise PlatformError(str(status.get("error") or "exam parsing failed"), HTTPStatus.UNPROCESSABLE_ENTITY)
+                raise PlatformError("exam document is not ready", HTTPStatus.CONFLICT)
+            return document, revision
+
+    def document(self, exam_id: str, name: str) -> dict[str, object]:
+        return self.document_with_revision(exam_id, name)[0]
 
     def source_path(self, exam_id: str) -> tuple[Path, str, str]:
         directory = _safe_exam_directory(exam_id)
@@ -1549,8 +2640,14 @@ class PlatformService:
             raise PlatformError("page asset not found", HTTPStatus.NOT_FOUND)
         return path, "image/jpeg", filename
 
-    def _retrieve(self, exam_id: str, question_id: str, query: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        path = _safe_exam_directory(exam_id) / "rag.sqlite3"
+    def _retrieve(
+        self,
+        exam_id: str,
+        question_id: str,
+        query: str,
+        snapshot: Path | None = None,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        path = (snapshot or _safe_exam_directory(exam_id)) / "rag.sqlite3"
         if not path.is_file():
             return [], []
         connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -1592,13 +2689,14 @@ class PlatformService:
             connection.close()
 
     def assistant(self, exam_id: str, payload: dict[str, object]) -> dict[str, object]:
-        allowed = {"questionId", "message", "userAnswer", "history"}
+        allowed = {"questionId", "message", "userAnswer", "history", "reviewRevision"}
         if set(payload) - allowed:
             raise PlatformError("assistant request contains unsupported fields")
         question_id = payload.get("questionId")
         message = payload.get("message")
         user_answer = payload.get("userAnswer")
         history = payload.get("history", [])
+        expected_revision = payload.get("reviewRevision")
         if not isinstance(question_id, str) or not re.fullmatch(
             r"(?:q[1-9][0-9]{0,2}|writing-[1-9][0-9]{0,2}|translation-[1-9][0-9]{0,2})",
             question_id,
@@ -1608,6 +2706,12 @@ class PlatformService:
             raise PlatformError(f"message must contain 1 to {MAX_ASSISTANT_MESSAGE_CHARS} characters")
         if user_answer is not None and (not isinstance(user_answer, str) or len(user_answer) > 100):
             raise PlatformError("userAnswer must be a short string")
+        if expected_revision is not None and (
+            isinstance(expected_revision, bool)
+            or not isinstance(expected_revision, int)
+            or expected_revision < 0
+        ):
+            raise PlatformError("reviewRevision must be a non-negative integer")
         if not isinstance(history, list) or len(history) > MAX_ASSISTANT_HISTORY:
             raise PlatformError(f"history may contain at most {MAX_ASSISTANT_HISTORY} messages")
         clean_history: list[dict[str, str]] = []
@@ -1619,21 +2723,28 @@ class PlatformService:
                 raise PlatformError(f"history[{index}] is invalid")
             clean_history.append({"role": role, "content": content.strip()})
 
-        questions_document = self.document(exam_id, "questions")
-        questions = questions_document.get("questions", [])
-        question = next((item for item in questions if isinstance(item, dict) and item.get("questionId") == question_id), None)
-        if question is None:
-            raise PlatformError("questionId was not found in the parsed paper", HTTPStatus.NOT_FOUND)
-        answers_document = self.document(exam_id, "answers")
-        answers = answers_document.get("answers", [])
-        official = next((item for item in answers if isinstance(item, dict) and item.get("questionId") == question_id), None)
+        # Resolve the revision once so question, answer, and RAG evidence cannot
+        # come from different review snapshots during an atomic publication.
+        with self._lock:
+            snapshot, revision, _ = self._current_review_snapshot(exam_id)
+            if expected_revision is not None and expected_revision != revision:
+                raise PlatformError(
+                    f"review revision changed; current revision is {revision}",
+                    HTTPStatus.CONFLICT,
+                )
+            questions_document, answers_document = self._snapshot_documents(snapshot)
+            questions = questions_document.get("questions", [])
+            question = next((item for item in questions if isinstance(item, dict) and item.get("questionId") == question_id), None)
+            if question is None:
+                raise PlatformError("questionId was not found in the parsed paper", HTTPStatus.NOT_FOUND)
+            answers = answers_document.get("answers", [])
+            official = next((item for item in answers if isinstance(item, dict) and item.get("questionId") == question_id), None)
+            retrieval_query = " ".join(
+                [question_id, str(question.get("stem") or ""), str(message), str(user_answer or "")]
+            )
+            exact, vector = self._retrieve(exam_id, question_id, retrieval_query, snapshot=snapshot)
         official_explanation_found = bool(official and str(official.get("explanation") or "").strip())
         disclaimer = "" if official_explanation_found else "答案资料中没有找到官方解析，以下为 AI 辅助分析。"
-
-        retrieval_query = " ".join(
-            [question_id, str(question.get("stem") or ""), str(message), str(user_answer or "")]
-        )
-        exact, vector = self._retrieve(exam_id, question_id, retrieval_query)
         reply = self._grounded_fallback(question_id, question, official, user_answer, disclaimer)
         api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
         if api_key and api_key not in {"YOUR_DEEPSEEK_API_KEY", "PASTE_YOUR_DEEPSEEK_API_KEY_HERE"}:
@@ -1655,6 +2766,7 @@ class PlatformService:
         return {
             "examId": exam_id,
             "questionId": question_id,
+            "revision": revision,
             "reply": reply,
             "grounding": {
                 "officialExplanationFound": official_explanation_found,
@@ -1678,7 +2790,10 @@ class PlatformService:
         if user_answer:
             parts.append(f"你的答案是 {user_answer}。")
         if official:
-            parts.append(f"你上传的答案资料明确给出的正确答案是 {official.get('answer')}。")
+            if official.get("source") == "human_review":
+                parts.append(f"人工复核后的答案记录给出的正确答案是 {official.get('answer')}。")
+            else:
+                parts.append(f"你上传的答案资料明确给出的正确答案是 {official.get('answer')}。")
             explanation = str(official.get("explanation") or "").strip()
             if explanation:
                 parts.append(f"答案资料中的解析：{explanation}")
@@ -1777,6 +2892,7 @@ class PlatformAPI:
         r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/assets/pages/(page-[1-9][0-9]{0,2}\.jpg)$"
     )
     ASSISTANT_ROUTE = re.compile(r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/assistant$")
+    REVIEW_ROUTE = re.compile(r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/review$")
 
     def __init__(self) -> None:
         self.service = PlatformService()
@@ -1793,8 +2909,21 @@ class PlatformAPI:
             handler._json_error(HTTPStatus.BAD_REQUEST, "query parameters are not supported")
             return True
         try:
+            if path == "/api/exams/capabilities":
+                handler._json_response(HTTPStatus.OK, self.service.capabilities(), include_body=include_body)
+                return True
             if path == "/api/exams":
                 handler._json_response(HTTPStatus.OK, self.service.list_exams(), include_body=include_body)
+                return True
+            review = self.REVIEW_ROUTE.fullmatch(path)
+            if review:
+                document = self.service.review(review.group(1))
+                handler._json_response(
+                    HTTPStatus.OK,
+                    document,
+                    include_body=include_body,
+                    extra_headers={"ETag": str(document["etag"])},
+                )
                 return True
             detail = self.DETAIL_ROUTE.fullmatch(path)
             if detail:
@@ -1802,7 +2931,22 @@ class PlatformAPI:
                 if resource == "status":
                     handler._json_response(HTTPStatus.OK, self.service.status(exam_id), include_body=include_body)
                 elif resource in {"manifest", "questions", "answers"}:
-                    handler._json_response(HTTPStatus.OK, self.service.document(exam_id, resource), include_body=include_body)
+                    document, revision = self.service.document_with_revision(exam_id, resource)
+                    if resource in {"questions", "answers"}:
+                        requested_etag = handler.headers.get("If-Match", "").strip()
+                        if requested_etag and _parse_review_etag(requested_etag) != revision:
+                            raise PlatformError(
+                                f"review revision changed; current revision is {revision}",
+                                HTTPStatus.PRECONDITION_FAILED,
+                            )
+                        handler._json_response(
+                            HTTPStatus.OK,
+                            document,
+                            include_body=include_body,
+                            extra_headers={"ETag": _review_etag(revision)},
+                        )
+                    else:
+                        handler._json_response(HTTPStatus.OK, document, include_body=include_body)
                 elif resource == "audio":
                     self._serve_file(handler, *self.service.audio_path(exam_id), include_body=include_body)
                 elif resource == "source":
@@ -1814,6 +2958,65 @@ class PlatformAPI:
                 return True
             raise PlatformError("API endpoint not found", HTTPStatus.NOT_FOUND)
         except PlatformError as error:
+            self._send_error(handler, error)
+            return True
+
+    def handle_patch(self, handler, parsed) -> bool:
+        path = parsed.path.rstrip("/") or "/"
+        if not path.startswith("/api/exams"):
+            return False
+        if parsed.query:
+            handler._json_error(HTTPStatus.BAD_REQUEST, "query parameters are not supported")
+            return True
+        if not handler._request_is_same_origin():
+            handler._json_error(HTTPStatus.FORBIDDEN, "cross-origin requests are not allowed")
+            return True
+        try:
+            address = ipaddress.ip_address(str(handler.client_address[0]))
+        except (AttributeError, IndexError, ValueError):
+            address = None
+        review_host = urlparse(f"//{handler.headers.get('Host', '')}").hostname or ""
+        try:
+            host_is_loopback = ipaddress.ip_address(review_host).is_loopback
+        except ValueError:
+            host_is_loopback = review_host.lower() == "localhost"
+        if address is None or not address.is_loopback or not host_is_loopback:
+            handler._json_error(
+                HTTPStatus.FORBIDDEN,
+                "review writes are restricted to the local machine until authentication is configured",
+            )
+            return True
+        route = self.REVIEW_ROUTE.fullmatch(path)
+        if not route:
+            handler._json_error(HTTPStatus.NOT_FOUND, "API endpoint not found")
+            return True
+        try:
+            expected_revision = _parse_review_etag(handler.headers.get("If-Match", ""))
+            payload = self._read_json_body(handler, maximum=MAX_REVIEW_BYTES)
+            response = self.service.apply_review_patch(
+                route.group(1),
+                payload,
+                expected_revision,
+                actor="local-reviewer",
+            )
+            handler._json_response(
+                HTTPStatus.OK,
+                response,
+                extra_headers={"ETag": str(response["etag"])},
+            )
+            return True
+        except PlatformError as error:
+            if error.status == HTTPStatus.CONFLICT:
+                try:
+                    current = self.service.review(route.group(1))
+                    handler._json_response(
+                        HTTPStatus.CONFLICT,
+                        {"error": error.message, "currentRevision": current["revision"]},
+                        extra_headers={"ETag": str(current["etag"])},
+                    )
+                    return True
+                except PlatformError:
+                    pass
             self._send_error(handler, error)
             return True
 
@@ -1844,7 +3047,7 @@ class PlatformAPI:
             return True
 
     @staticmethod
-    def _read_json_body(handler) -> dict[str, object]:
+    def _read_json_body(handler, maximum: int = MAX_ASSISTANT_BYTES) -> dict[str, object]:
         media_type = handler.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media_type != "application/json":
             raise PlatformError("Content-Type must be application/json", HTTPStatus.UNSUPPORTED_MEDIA_TYPE)
@@ -1857,7 +3060,7 @@ class PlatformAPI:
             raise PlatformError("invalid Content-Length")
         if length <= 0:
             raise PlatformError("request body must not be empty")
-        if length > MAX_ASSISTANT_BYTES:
+        if length > maximum:
             raise PlatformError("request body is too large", HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         raw = handler.rfile.read(length)
         if len(raw) != length:

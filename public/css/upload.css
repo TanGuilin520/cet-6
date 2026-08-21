@@ -136,6 +136,9 @@ svg { width: 1.1em; height: 1.1em; fill: none; stroke: currentColor; stroke-widt
 .form-notice { margin-top: 22px; padding: 11px 12px; display: flex; align-items: flex-start; gap: 8px; color: #6f8390; border-left: 3px solid #d7aa47; border-radius: 0 8px 8px 0; background: #fff8e9; font-size: 9px; line-height: 1.65; }
 .form-notice svg { width: 14px; flex: 0 0 auto; margin-top: 1px; color: #bd8524; }
 .form-notice p { margin: 0; }
+.ocr-capability { margin-top: 5px; display: block; color: #8a6a28; font-size: 8px; font-weight: 750; }
+.ocr-capability[data-state="ready"] { color: #347557; }
+.ocr-capability[data-state="warning"] { color: #a45742; }
 .form-error { margin: 13px 0 0; padding: 10px 11px; color: #a94e47; border: 1px solid #edc5c1; border-radius: 8px; outline: 0; background: #fff7f6; font-size: 9px; line-height: 1.55; }
 .form-actions { margin-top: 21px; display: flex; align-items: center; justify-content: flex-end; gap: 9px; }
 .primary-button, .secondary-button { min-height: 41px; padding: 0 15px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; border-radius: 9px; font-size: 10px; font-weight: 800; }
@@ -196,6 +199,8 @@ svg { width: 1.1em; height: 1.1em; fill: none; stroke: currentColor; stroke-widt
 .processing-error button, .processing-ready a { min-height: 29px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; border-radius: 7px; white-space: nowrap; font-size: 8px; font-weight: 800; }
 .processing-error button { color: #a94e47; border: 1px solid #e3ada8; background: #fff; }
 .processing-ready a { color: #fff; background: #3f9367; }
+.ready-actions { display: flex; align-items: center; gap: 5px; }
+.ready-actions #open-review { color: #347557; border: 1px solid #9bcbae; background: #fff; }
 .processing-card[data-state="ready"] .status-badge { color: #397a58; background: #e6f5ec; }
 .processing-card[data-state="failed"] .status-badge { color: #a94e47; background: #fae9e7; }
 .processing-card[data-state="failed"] .progress-track > span { background: #ce7067; }
@@ -221,6 +226,8 @@ svg { width: 1.1em; height: 1.1em; fill: none; stroke: currentColor; stroke-widt
 .recent-stage { max-width: 55%; overflow: hidden; color: #8d9ca4; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .recent-card a { color: #287ca5; font-size: 9px; font-weight: 800; }
 .recent-card a:hover { color: #155a80; }
+.recent-card-actions { display: flex; align-items: center; gap: 9px; }
+.recent-card-actions a:first-child { color: #4c8466; }
 
 .upload-footer { min-height: 88px; padding: 24px max(5.2vw, 28px); display: flex; align-items: center; justify-content: space-between; gap: 20px; color: #8999a2; border-top: 1px solid #e1e9eb; background: #fbfcfc; }
 .upload-footer p { margin: 0; font-size: 9px; line-height: 1.6; }
@@ -269,7 +276,8 @@ svg { width: 1.1em; height: 1.1em; fill: none; stroke: currentColor; stroke-widt
   .processing-metrics { grid-template-columns: 1fr 1fr; row-gap: 12px; }
   .processing-metrics div:nth-child(3) { border-left: 0; }
   .processing-error, .processing-ready { grid-template-columns: 25px minmax(0, 1fr); }
-  .processing-error button, .processing-ready a { grid-column: 1 / -1; }
+  .processing-error button, .processing-ready > .ready-actions { grid-column: 1 / -1; }
+  .ready-actions a { flex: 1; }
   .recent-heading { align-items: center; }
   .recent-heading h2 { font-size: 21px; }
   .recent-list { grid-template-columns: 1fr; }

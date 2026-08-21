@@ -99,7 +99,10 @@
 
               <div class="form-notice">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8h.01" /></svg>
-                <p>含文字层的 PDF 会直接提取坐标；扫描卷自动使用 OCR。低置信度题目、冲突答案和未识别题号会单独报告，不会自动补猜。</p>
+                <p>
+                  含文字层的 PDF 会直接提取坐标；扫描卷自动使用 OCR。低置信度题目、冲突答案和未识别题号会单独报告，不会自动补猜。
+                  <span class="ocr-capability" id="ocr-capability" role="status">正在检测本机 OCR 能力…</span>
+                </p>
               </div>
               <p class="form-error" id="form-error" role="alert" tabindex="-1" hidden></p>
               <div class="form-actions">
@@ -158,7 +161,10 @@
               <div class="processing-ready" id="processing-ready" tabindex="-1" hidden>
                 <span aria-hidden="true">✓</span>
                 <div><b>完整试卷已经生成</b><p id="ready-summary">现在可以进入阅读器检查文字与版式。</p></div>
-                <a id="open-reader" href="reader.html">打开试卷 <span aria-hidden="true">→</span></a>
+                <div class="ready-actions">
+                  <a id="open-review" href="review.html">复核解析</a>
+                  <a id="open-reader" href="reader.html">打开试卷 <span aria-hidden="true">→</span></a>
+                </div>
               </div>
             </section>
           </aside>
