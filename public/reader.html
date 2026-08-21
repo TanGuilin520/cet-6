@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="完整英语四级真题阅读器，支持单词查译朗读、直线、文字矩形荧光标记和选段标签。" />
+    <meta name="theme-color" content="#243746" />
+    <title>完整试卷 · CET-4 Exam Viewer</title>
+    <link rel="preload" href="assets/papers/2021-06-set-01/pages/page-1.jpg" as="image" type="image/jpeg" />
+    <link rel="stylesheet" href="css/reader.css" />
+  </head>
+  <body>
+    <div class="exam-viewer" id="exam-viewer" data-tool="select">
+      <header class="app-header">
+        <div class="app-header__start">
+          <a class="back-link" href="index.html" aria-label="返回试卷列表">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7M8 12h10" /></svg>
+            <span>试卷列表</span>
+          </a>
+          <span class="header-divider" aria-hidden="true"></span>
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+          <div class="paper-title">
+            <strong id="paper-title">正在载入完整试卷…</strong>
+            <small>FULL EXAM PAPER · LOCAL ARCHIVE</small>
+          </div>
+        </div>
+        <div class="app-header__end">
+          <span class="save-indicator" id="save-indicator"><i></i> 自动保存</span>
+          <a class="header-action" id="download-paper" href="#" download>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" /></svg>
+            <span>下载原卷</span>
+          </a>
+        </div>
+      </header>
+
+      <nav class="viewer-toolbar" aria-label="试卷工具栏">
+        <div class="toolbar-group toolbar-group--pages" aria-label="翻页">
+          <button class="icon-button" id="previous-page" type="button" aria-label="上一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7" /></svg></button>
+          <label class="page-number-control"><input id="current-page" type="number" min="1" value="1" aria-label="当前页码" /><span>/ <b id="page-count">8</b></span></label>
+          <button class="icon-button" id="next-page" type="button" aria-label="下一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
+        </div>
+
+        <span class="toolbar-separator" aria-hidden="true"></span>
+
+        <div class="toolbar-group toolbar-group--zoom" aria-label="缩放">
+          <button class="icon-button" id="zoom-out" type="button" aria-label="缩小"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M7.5 10.5h6M15.5 15.5 21 21" /></svg></button>
+          <output id="zoom-value">适合宽度</output>
+          <button class="icon-button" id="zoom-in" type="button" aria-label="放大"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M7.5 10.5h6m-3-3v6M15.5 15.5 21 21" /></svg></button>
+          <button class="text-button" id="fit-width" type="button">适宽</button>
+        </div>
+
+        <span class="toolbar-separator" aria-hidden="true"></span>
+
+        <div class="toolbar-group toolbar-group--marks" aria-label="标注工具">
+          <button class="tool-button" type="button" data-tool="select" aria-pressed="true" title="单击单词查译并朗读；拖选一段文字记录标签">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h5M7.5 4v16M5 20h5" /><path d="m13 11 7 3-3 1.5L15.5 19z" /></svg><span>查词 / 标签</span>
+          </button>
+          <button class="tool-button" type="button" data-tool="copy" aria-pressed="false" title="拖选文字并复制纯文本">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg><span>选段复制</span>
+          </button>
+          <button class="tool-button" type="button" data-tool="line" aria-pressed="false" title="按下起点，拖动并松开画直线">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19 20 5" /><circle cx="4" cy="19" r="1.5"/><circle cx="20" cy="5" r="1.5"/></svg><span>直线</span>
+          </button>
+          <button class="tool-button tool-button--highlight" type="button" data-tool="highlight" aria-pressed="false" title="拖选文字后生成规整矩形覆盖">
+            <span class="highlighter-icon" aria-hidden="true">A</span><span>荧光笔</span>
+          </button>
+          <label class="color-control" title="直线颜色"><input id="line-color" type="color" value="#d84a44" aria-label="选择直线颜色" /><span>线色</span></label>
+          <label class="color-control" title="荧光笔颜色"><input id="highlight-color" type="color" value="#f6d64a" aria-label="选择荧光笔颜色" /><span>荧光色</span></label>
+          <button class="tool-button" type="button" data-tool="eraser" aria-pressed="false" title="划过标注进行擦除">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 16 8.8-8.8a2.2 2.2 0 0 1 3.1 0l1.9 1.9a2.2 2.2 0 0 1 0 3.1L12 21H6l-2-2z" /><path d="M12 21h8" /></svg><span>橡皮擦</span>
+          </button>
+          <button class="tool-button" id="undo-mark" type="button" disabled title="撤回最近一次标注">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5" /><path d="M4 12h10a6 6 0 0 1 6 6" /></svg><span>撤回</span>
+          </button>
+        </div>
+
+        <div class="toolbar-group toolbar-group--view">
+          <button class="text-button question-panel-toggle" id="toggle-question-panel" type="button" hidden aria-controls="annotation-sidebar" aria-expanded="false">
+            答题 <b id="toolbar-answer-count">0/0</b>
+          </button>
+          <button class="icon-button" id="toggle-thumbnails" type="button" aria-pressed="true" aria-label="显示或隐藏缩略图"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6" height="7" rx="1"/><rect x="14" y="4" width="6" height="7" rx="1"/><rect x="4" y="15" width="6" height="5" rx="1"/><rect x="14" y="15" width="6" height="5" rx="1"/></svg></button>
+          <button class="icon-button" id="toggle-notes" type="button" aria-pressed="true" aria-label="显示或隐藏标签面板"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v16H5zM9 8h6M9 12h6M9 16h4" /></svg></button>
+        </div>
+      </nav>
+
+      <div class="viewer-body">
+        <aside class="thumbnail-sidebar" id="thumbnail-sidebar" aria-label="页面缩略图">
+          <header><div><span>DOCUMENT</span><strong>完整试卷</strong></div><b id="sidebar-page-count">8 页</b></header>
+          <div class="thumbnail-list" id="thumbnail-list"></div>
+        </aside>
+
+        <main class="document-viewport" id="document-viewport" tabindex="0" aria-label="完整试卷页面">
+          <div class="viewer-loading" id="viewer-loading">
+            <img class="viewer-loading-preview" src="assets/papers/2021-06-set-01/pages/page-1.jpg" alt="2021 年 6 月四级真题第 1 套首页预览" />
+            <div class="viewer-loading-status"><span></span><p>正在载入完整试卷与文字层…</p></div>
+          </div>
+          <div class="document-pages" id="document-pages"></div>
+        </main>
+
+        <aside class="annotation-sidebar" id="annotation-sidebar" aria-label="试题导航、标签与标注记录">
+          <section class="question-workspace" id="question-workspace" hidden aria-labelledby="question-workspace-title">
+            <header class="question-workspace-header">
+              <div><span>ANSWER SHEET</span><strong id="question-workspace-title">试题导航</strong></div>
+              <button class="question-panel-close" id="close-question-panel" type="button" aria-label="关闭试题导航">×</button>
+            </header>
+            <div class="exam-audio" id="exam-audio" hidden>
+              <div class="exam-audio-heading">
+                <label for="exam-audio-player">听力音频</label>
+                <label for="exam-audio-speed">倍速
+                  <select id="exam-audio-speed" aria-label="听力播放速度">
+                    <option value="0.75">0.75×</option>
+                    <option value="1" selected>1.0×</option>
+                    <option value="1.25">1.25×</option>
+                    <option value="1.5">1.5×</option>
+                    <option value="2">2.0×</option>
+                  </select>
+                </label>
+              </div>
+              <audio id="exam-audio-player" controls preload="metadata"></audio>
+            </div>
+            <div class="question-progress" data-question-only>
+              <div><b id="answered-count">0</b><span id="question-total">/ 0 已作答</span><small id="flagged-count">0 道待复查</small></div>
+              <div class="question-progress-track" role="progressbar" aria-label="作答进度" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><i id="question-progress-bar"></i></div>
+            </div>
+            <div class="question-legend" data-question-only aria-label="题目状态说明"><span>当前</span><span>已答</span><span>待复查</span></div>
+            <nav class="question-navigator" id="question-navigator" data-question-only aria-label="题号导航"></nav>
+            <section class="question-detail" id="question-detail" data-question-only aria-live="polite"></section>
+            <section class="exam-result" id="exam-result" data-question-only hidden></section>
+            <button class="submit-exam-button" id="submit-exam" data-question-only type="button">提交客观题并评分</button>
+          </section>
+          <header><div><span>ANNOTATIONS</span><strong>我的标注</strong></div><b id="annotation-total">0</b></header>
+          <section class="tool-guide" id="tool-guide">
+            <span class="guide-icon" aria-hidden="true">T</span>
+            <div><b>查词与选段标签</b><p>单击单词查看翻译并朗读；拖选一段文字记录标签。切换荧光笔则生成规整文字矩形。</p></div>
+          </section>
+          <dl class="mark-stats">
+            <div><dt id="line-count">0</dt><dd>直线</dd></div>
+            <div><dt id="highlight-count">0</dt><dd>荧光标记</dd></div>
+            <div><dt id="tag-count">0</dt><dd>段落标签</dd></div>
+          </dl>
+          <section class="tag-records">
+            <div class="panel-heading"><h2>段落标签</h2><span>点击定位</span></div>
+            <ul id="tag-record-list"><li class="empty-record">还没有标签。选择“查词 / 标签”后拖选试卷文字。</li></ul>
+          </section>
+          <section class="viewer-tip"><b>操作提示</b><p>直线只记录起点与终点，因此始终笔直；荧光笔严格使用文字坐标，不会画歪。</p></section>
+        </aside>
+      </div>
+
+      <section class="tag-editor" id="tag-editor" role="dialog" aria-labelledby="tag-editor-title" aria-hidden="true">
+        <p class="editor-kicker">SELECTION TAG</p>
+        <h2 id="tag-editor-title">记录所选文本</h2>
+        <p class="selected-quote" id="selected-quote"></p>
+        <div class="tag-options" role="radiogroup" aria-label="常用标签">
+          <button type="button" data-tag-label="重点" data-tag-tone="amber" role="radio" aria-checked="true">重点</button>
+          <button type="button" data-tag-label="长难句" data-tag-tone="blue" role="radio" aria-checked="false">长难句</button>
+          <button type="button" data-tag-label="生词" data-tag-tone="green" role="radio" aria-checked="false">生词</button>
+          <button type="button" data-tag-label="疑问" data-tag-tone="purple" role="radio" aria-checked="false">疑问</button>
+        </div>
+        <label class="editor-field"><span>标签名称</span><input id="tag-label" type="text" maxlength="16" value="重点" /></label>
+        <label class="editor-field editor-field--note"><span>复习备注</span><textarea id="tag-note" rows="3" maxlength="260" placeholder="记录证据、语法点或复习提示（可选）…"></textarea></label>
+        <div class="editor-actions"><button class="delete-button" id="delete-tag" type="button" hidden>删除标签</button><span></span><button class="secondary-button" id="cancel-tag" type="button">取消</button><button class="primary-button" id="save-tag" type="button">保存标签</button></div>
+      </section>
+
+      <section class="word-popover" id="word-popover" role="dialog" aria-labelledby="lookup-word" aria-hidden="true">
+        <button class="word-popover-close" id="word-popover-close" type="button" aria-label="关闭单词卡">×</button>
+        <p class="word-popover-kicker">WORD LOOKUP</p>
+        <div class="word-popover-heading">
+          <div>
+            <h2 id="lookup-word">单词</h2>
+            <p class="word-popover-status" id="lookup-status" role="status" aria-live="polite">正在查询中文释义…</p>
+          </div>
+          <button class="word-pronounce-button" id="lookup-pronounce" type="button" aria-label="朗读当前单词" title="朗读当前单词">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 4V6L8 10z" /><path d="M16 9a4 4 0 0 1 0 6m2.5-8.5a7.5 7.5 0 0 1 0 11" /></svg>
+            <span>朗读</span>
+          </button>
+        </div>
+        <p class="word-popover-translation" id="lookup-translation"></p>
+        <p class="word-popover-hint">单击词卡外关闭；拖选文字仍可记录标签。</p>
+      </section>
+
+      <section class="selection-copy-panel" id="selection-copy-panel" role="dialog" aria-modal="false" aria-labelledby="selection-copy-title" aria-hidden="true">
+        <button class="selection-copy-close" id="close-selection-copy" type="button" aria-label="关闭复制面板">×</button>
+        <p class="selection-copy-kicker">COPY SELECTION</p>
+        <h2 id="selection-copy-title">复制所选文本</h2>
+        <label for="selection-copy-text">已选择内容</label>
+        <textarea id="selection-copy-text" rows="6" readonly aria-describedby="selection-copy-hint"></textarea>
+        <p id="selection-copy-hint">文本已按试卷阅读顺序整理，可直接复制到笔记。</p>
+        <div class="selection-copy-actions">
+          <button class="secondary-button" type="button" data-close-selection-copy>取消</button>
+          <button class="primary-button" id="copy-selection-text" type="button">复制文本</button>
+        </div>
+      </section>
+
+      <div class="panel-backdrop" id="question-panel-backdrop" hidden></div>
+      <button class="ai-floating-launcher" id="ai-floating-launcher" type="button" aria-controls="ai-question-panel" aria-expanded="false" aria-label="打开本题 AI 助手" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17.5 4 20v-5.2A8 8 0 1 1 20 12a7.8 7.8 0 0 1-1.2 4.2" /><path d="M8.5 11.8h.01m3.49 0h.01m3.49 0h.01" /></svg>
+        <span>问 AI</span>
+      </button>
+      <div class="panel-backdrop panel-backdrop--ai" id="ai-panel-backdrop" hidden></div>
+      <aside class="ai-question-panel" id="ai-question-panel" aria-hidden="true" aria-labelledby="ai-question-title">
+        <header>
+          <div><p>AI QUESTION COACH</p><h2 id="ai-question-title">本题 AI 助手</h2></div>
+          <div class="ai-question-header-actions">
+            <button id="minimize-ai-question" type="button" aria-label="最小化 AI 助手" aria-controls="ai-question-panel" aria-expanded="true">−</button>
+            <button id="close-ai-question" type="button" aria-label="关闭 AI 助手">×</button>
+          </div>
+        </header>
+        <p class="ai-question-context" id="ai-question-context">先从题号导航选择一道题。</p>
+        <div class="ai-question-messages" id="ai-question-messages" aria-live="polite"></div>
+        <form class="ai-question-form" id="ai-question-form">
+          <label for="ai-question-input">针对当前题提问</label>
+          <textarea id="ai-question-input" rows="3" maxlength="2000" placeholder="例如：为什么不能选 B？原文证据在哪里？" required></textarea>
+          <button type="submit">发送问题</button>
+        </form>
+      </aside>
+
+      <div class="toast" id="viewer-toast" role="status" aria-live="polite"></div>
+    </div>
+    <script src="js/reader.js"></script>
+  </body>
+</html>

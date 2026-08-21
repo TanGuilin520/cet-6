@@ -1,0 +1,26 @@
+# Local secrets
+.env
+.env.*
+!.env.example
+
+# Python runtime files
+__pycache__/
+*.py[cod]
+
+# Dynamically generated pronunciation audio
+public/assets/audio/cache/
+
+# Large local reference archives (PDF/MP3); use Git LFS if versioning is needed
+data/reference/*
+!data/reference/README.md
+
+# Uploaded exams, generated pages, indexes, and job state
+data/exams/
+
+# Local/editor clutter
+.DS_Store
+*.log
+.pytest_cache/
+.idea/
+.vscode/
+node_modules/

@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="面向大学英语四级备考的原创在线真题练习网页原型。" />
+    <meta name="theme-color" content="#183a5a" />
+    <title>四级真题库 · 在线练习</title>
+    <link rel="stylesheet" href="css/home.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="site-header">
+        <a class="brand" href="#top" aria-label="返回首页">
+          <span class="brand-mark" aria-hidden="true">
+            <i></i><i></i><i></i><i></i>
+          </span>
+          <span>
+            <strong>四级真题库</strong>
+            <small>CET-4 PRACTICE</small>
+          </span>
+        </a>
+
+        <nav class="desktop-nav" aria-label="主导航">
+          <a class="active" href="#papers">真题练习</a>
+          <a href="#method">学习方式</a>
+          <a href="#records">学习记录</a>
+        </nav>
+
+        <div class="header-actions">
+          <button class="icon-button notification-button" type="button" aria-label="学习提醒" data-toast="今天的学习计划已准备好">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" /></svg>
+          </button>
+          <button class="profile-button" type="button" data-toast="登录功能可在接入后端后启用">
+            <span class="profile-avatar">L</span>
+            <span class="profile-name">学习者</span>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5" /></svg>
+          </button>
+          <button class="menu-button icon-button" type="button" aria-controls="mobile-nav" aria-expanded="false" aria-label="打开导航">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16" /></svg>
+          </button>
+        </div>
+      </header>
+
+      <nav id="mobile-nav" class="mobile-nav" aria-label="移动导航">
+        <a class="active" href="#papers">真题练习</a>
+        <a href="#method">学习方式</a>
+        <a href="#records">学习记录</a>
+      </nav>
+
+      <main id="top">
+        <section class="hero" aria-labelledby="page-title">
+          <div class="hero-copy">
+            <p class="eyebrow"><span></span> CET-4 ONLINE PAPER BANK</p>
+            <h1 id="page-title">把每一套真题，<br />练成你的<span>得分方法</span></h1>
+            <p class="hero-description">按试卷原貌组织听力、阅读、翻译和写作。在线完成训练，留下每一次进步的轨迹。</p>
+            <div class="hero-actions">
+              <a class="primary-button" href="#papers">开始做真题 <span aria-hidden="true">→</span></a>
+              <button class="text-button" type="button" data-scroll="#method">了解学习方式 <span aria-hidden="true">↓</span></button>
+            </div>
+            <dl class="hero-stats" aria-label="题库数据">
+              <div><dt id="paper-total">36</dt><dd>套模拟试卷</dd></div>
+              <div><dt>4</dt><dd>大题型覆盖</dd></div>
+              <div><dt>随时</dt><dd>保存学习进度</dd></div>
+            </dl>
+          </div>
+
+          <div class="hero-visual" aria-label="在线练习界面预览">
+            <div class="visual-glow glow-one"></div>
+            <div class="visual-glow glow-two"></div>
+            <div class="visual-paper">
+              <div class="paper-topline"><span>2025 · 12</span><span>SET 01</span></div>
+              <div class="paper-title">大学英语四级考试</div>
+              <div class="paper-subtitle">College English Test · Band 4</div>
+              <div class="paper-lines"><i></i><i></i><i></i><i></i></div>
+              <div class="paper-bottom"><span>Listening · Reading</span><b>04</b></div>
+            </div>
+            <div class="hero-floating-card progress-float">
+              <span class="float-icon chart-icon"><i></i><i></i><i></i></span>
+              <div><small>本周完成度</small><strong>72%</strong></div>
+              <svg viewBox="0 0 38 38" aria-hidden="true"><circle cx="19" cy="19" r="15"></circle><circle class="progress-circle" cx="19" cy="19" r="15"></circle></svg>
+            </div>
+            <div class="hero-floating-card words-float">
+              <span class="float-icon word-icon">Aa</span>
+              <div><small>已掌握词汇</small><strong>1,248 <em>words</em></strong></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="quick-progress" id="records" aria-labelledby="progress-title">
+          <div class="progress-copy">
+            <p class="section-kicker">LEARNING DASHBOARD</p>
+            <h2 id="progress-title">今天，继续上次的练习</h2>
+            <p>2025 年 6 月 · 第 2 套，还剩阅读理解与翻译。</p>
+          </div>
+          <div class="continue-progress" aria-label="当前练习进度 46%">
+            <div class="progress-label"><span>完成进度</span><strong id="continue-value">46%</strong></div>
+            <div class="progress-track"><span id="continue-bar" style="width: 46%"></span></div>
+          </div>
+          <button class="continue-button" type="button" data-paper-id="2025-06-02">继续练习 <span aria-hidden="true">→</span></button>
+        </section>
+
+        <section class="method-section" id="method" aria-labelledby="method-title">
+          <div class="section-heading">
+            <div>
+              <p class="section-kicker">STUDY WITH A SYSTEM</p>
+              <h2 id="method-title">像做真题一样，认真复盘</h2>
+            </div>
+            <p>从整套限时训练到薄弱题型专项，学习节奏由你安排。</p>
+          </div>
+          <div class="method-grid">
+            <article class="method-card card-blue">
+              <span class="method-number">01</span>
+              <div class="method-icon headset" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 14v-2a8 8 0 0 1 16 0v2M4 14h3v5H5a1 1 0 0 1-1-1v-4Zm13 0h3v4a1 1 0 0 1-1 1h-2v-5Zm2 5c0 2-1.8 3-4 3h-1" /></svg></div>
+              <h3>沉浸式做题</h3>
+              <p>按考试流程完成整套试卷，专注当下，不被答案打断。</p>
+            </article>
+            <article class="method-card card-amber">
+              <span class="method-number">02</span>
+              <div class="method-icon note" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 3h11l3 3v15H5zM16 3v4h4M8 12h8M8 16h6" /></svg></div>
+              <h3>边做边积累</h3>
+              <p>生词、错题和重点句随手收集，复习时一键回看。</p>
+            </article>
+            <article class="method-card card-mint">
+              <span class="method-number">03</span>
+              <div class="method-icon route" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="6" cy="17" r="2"/><circle cx="18" cy="7" r="2"/><path d="M8 17c6 0 3-8 8-8"/></svg></div>
+              <h3>看见成长路径</h3>
+              <p>自动保留练习记录，清晰了解各题型的完成情况。</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="papers-section" id="papers" aria-labelledby="papers-title">
+          <div class="section-heading papers-heading">
+            <div>
+              <p class="section-kicker">PAST PAPER LIBRARY</p>
+              <h2 id="papers-title">选择一套试卷开始</h2>
+            </div>
+            <div class="papers-heading-actions">
+              <button class="upload-paper-button" type="button" id="upload-paper">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5 5 5M5 20h14" /></svg>
+                导入试卷
+              </button>
+              <button class="outline-button" type="button" id="show-favorites">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 20-7-6.3A4.7 4.7 0 0 1 11.3 7L12 8l.7-1A4.7 4.7 0 0 1 19 13.7L12 20Z" /></svg>
+                我的收藏 <span id="favorite-count">0</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="paper-controls">
+            <div class="filter-tabs" role="tablist" aria-label="按题型筛选">
+              <button class="filter-tab active" role="tab" aria-selected="true" data-filter="all">全部试卷</button>
+              <button class="filter-tab" role="tab" aria-selected="false" data-filter="recent">近三年</button>
+              <button class="filter-tab" role="tab" aria-selected="false" data-filter="listening">听力重点</button>
+              <button class="filter-tab" role="tab" aria-selected="false" data-filter="reading">阅读重点</button>
+            </div>
+            <label class="search-box">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg>
+              <input id="paper-search" type="search" placeholder="搜索年份或试卷" autocomplete="off" />
+            </label>
+          </div>
+
+          <div id="paper-groups" class="paper-groups" aria-live="polite"></div>
+          <div id="empty-state" class="empty-state" hidden>
+            <span>⌕</span>
+            <h3>没有找到相符的试卷</h3>
+            <p>换个关键词，或清除筛选条件再试一次。</p>
+            <button class="text-button reset-button" type="button">查看全部试卷</button>
+          </div>
+          <button id="load-more" class="load-more" type="button"><span>展开更多年份</span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg></button>
+        </section>
+
+        <section class="cta-section">
+          <div>
+            <p class="section-kicker">YOUR NEXT PAPER</p>
+            <h2>现在开始，为下一次考试留出从容。</h2>
+          </div>
+          <a class="light-button" href="#papers">进入真题库 <span aria-hidden="true">→</span></a>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <a class="brand footer-brand" href="#top"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span><span><strong>四级真题库</strong><small>CET-4 PRACTICE</small></span></a>
+        <p>原创网页原型 · 题目内容、用户账户、音频与数据接口可继续接入。</p>
+        <a href="#top">回到顶部 ↑</a>
+      </footer>
+    </div>
+
+    <dialog id="paper-dialog" class="paper-dialog" aria-labelledby="dialog-paper-title">
+      <button class="dialog-close" type="button" aria-label="关闭详情">×</button>
+      <div id="dialog-content"></div>
+    </dialog>
+    <div id="dialog-backdrop" class="dialog-backdrop" hidden></div>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="js/home.js"></script>
+  </body>
+</html>
