@@ -6,9 +6,12 @@
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
   const builtInPapers = Object.freeze({
     '2021-06-01': {
-      manifestUrl: 'assets/papers/2021-06-set-01/manifest.json',
+      manifestUrl: '/api/papers/2021-06-01/manifest',
       assetRoot: 'assets/papers/2021-06-set-01/',
       sourceUrl: 'assets/papers/2021-06-set-01/source.pdf',
+      questionsUrl: '/api/papers/2021-06-01/questions',
+      answersUrl: '/api/papers/2021-06-01/answers',
+      assistantUrl: '/api/papers/2021-06-01/assistant',
     },
   });
   const requestedPaperId = new URLSearchParams(location.search).get('paper') || '2021-06-01';
@@ -18,10 +21,6 @@
     id: paperId,
     builtIn: true,
     ...builtInPapers[paperId],
-    questionsUrl: null,
-    answersUrl: null,
-    audioUrl: null,
-    assistantUrl: null,
   } : {
     id: paperId,
     builtIn: false,
@@ -30,7 +29,6 @@
     sourceUrl: `${uploadedApiRoot}/source`,
     questionsUrl: `${uploadedApiRoot}/questions`,
     answersUrl: `${uploadedApiRoot}/answers`,
-    audioUrl: `${uploadedApiRoot}/audio`,
     assistantUrl: `${uploadedApiRoot}/assistant`,
   };
   const manifestUrl = paperConfig.manifestUrl;
@@ -1305,10 +1303,8 @@
   function configureExamAudio() {
     const player = $('#exam-audio-player');
     const container = $('#exam-audio');
-    const audioUrl = resolveAssetUrl(manifest?.audioUrl || paperConfig.audioUrl);
-    if (!player || !container || !audioUrl) return;
-    if (player.dataset.source === audioUrl) return;
-    player.dataset.source = audioUrl;
+    if (!player || !container) return;
+    const audioUrl = resolveAssetUrl(manifest?.audioUrl);
     const reveal = () => {
       container.hidden = false;
       questionWorkspace.hidden = false;
@@ -1321,15 +1317,16 @@
       container.hidden = true;
       player.removeAttribute('src');
       delete player.dataset.source;
-      if (!questions.length) {
-        questionWorkspace.hidden = true;
-        $('#toggle-question-panel').hidden = true;
-      }
     };
-    player.addEventListener('loadedmetadata', reveal, { once: true });
+    if (!audioUrl) {
+      hide();
+      return;
+    }
+    if (player.dataset.source === audioUrl) return;
+    player.dataset.source = audioUrl;
     player.addEventListener('error', hide, { once: true });
     player.src = audioUrl;
-    player.load();
+    reveal();
   }
 
   async function loadQuestionData() {

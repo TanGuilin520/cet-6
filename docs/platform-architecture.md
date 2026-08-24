@@ -18,6 +18,10 @@ PDF Page Image              原卷 JPG，保持印刷版式
 
 “选段复制”复用透明文字层的原生 `Range` 与 word 坐标，只接受单页选区并限制为 20,000 字符。复制先尝试 Clipboard API，权限不可用时回退到兼容复制，仍失败则保留只读文本供用户手动复制。荧光标注在原 annotation 中增加独立 `color` 字段；旧记录没有颜色时使用 `#f6d64a`，不会修改旧数据结构。
 
+### 统一试卷目录与稳定内置 ID
+
+整套试卷不再分流到旧单篇练习页。首页以 `reader.html` 为唯一整卷入口，只合并内置资源和 `GET /api/exams` 返回的 ready 试卷；没有 PDF/manifest 的占位卡不会显示。内置 2021 卷固定使用 `2021-06-01`，后端只读 `/api/papers/...` 路由按 PDF SHA256 查找同源 runtime exam，并可复用其题目、答案、复核 ETag 与音频。查不到 runtime bundle 时回退仓库中的静态 questions/answers revision 0。映射不使用标题或随机 ID，不放宽 `/api/exams` 的路径正则，也不允许稳定 ID 进入复核写接口。
+
 ## 2. 上传与异步任务
 
 入口为 `/upload.html`。表单使用 `multipart/form-data`，字段如下：

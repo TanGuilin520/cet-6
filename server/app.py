@@ -111,9 +111,18 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(PUBLIC_DIR), **kwargs)
 
+    def end_headers(self) -> None:
+        # This is a local development server: HTML, JavaScript and CSS change
+        # frequently and must never leave a tab running a mixed old/new UI.
+        # Paper images and generated audio keep their normal cache behavior.
+        static_path = urlparse(self.path).path
+        if static_path == "/" or Path(static_path).suffix.lower() in {".html", ".js", ".css"}:
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, format: str, *args) -> None:
         # Keep the development console focused on startup and genuine errors.
-        if self.path.startswith(("/api/tts", "/api/deepseek", "/api/chat", "/api/exams")):
+        if self.path.startswith(("/api/tts", "/api/deepseek", "/api/chat", "/api/exams", "/api/papers")):
             return
         super().log_message(format, *args)
 

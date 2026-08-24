@@ -4,6 +4,7 @@
   const $ = (selector, context = document) => context.querySelector(selector);
   const $$ = (selector, context = document) => [...context.querySelectorAll(selector)];
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=2`;
   const form = $('#exam-upload-form');
   const processingCard = $('#processing-card');
   const processingEmpty = $('#processing-empty');
@@ -485,7 +486,7 @@
       : '页面与文字层已生成，现在可以进入阅读器检查版式。';
     setText($('#ready-summary'), readySummary);
     const openReader = $('#open-reader');
-    if (openReader && examId) openReader.href = 'reader.html?paper=' + encodeURIComponent(examId);
+    if (openReader && examId) openReader.href = unifiedReaderUrl(examId);
     const openReview = $('#open-review');
     if (openReview && examId) openReview.href = 'review.html?exam=' + encodeURIComponent(examId);
     $('#processing-error').hidden = true;
@@ -604,7 +605,7 @@
           const reviewLink = createElement('a', '', '复核');
           reviewLink.href = 'review.html?exam=' + encodeURIComponent(examId);
           const readerLink = createElement('a', '', '打开 →');
-          readerLink.href = 'reader.html?paper=' + encodeURIComponent(examId);
+          readerLink.href = unifiedReaderUrl(examId);
           actions.append(reviewLink, readerLink);
           footer.append(actions);
         } else {

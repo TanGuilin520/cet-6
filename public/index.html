@@ -6,7 +6,7 @@
     <meta name="description" content="面向大学英语四级备考的原创在线真题练习网页原型。" />
     <meta name="theme-color" content="#183a5a" />
     <title>四级真题库 · 在线练习</title>
-    <link rel="stylesheet" href="css/home.css" />
+    <link rel="stylesheet" href="css/home.css?v=20260824-unified-reader-2" />
   </head>
   <body>
     <div class="page-shell">
@@ -59,7 +59,7 @@
               <button class="text-button" type="button" data-scroll="#method">了解学习方式 <span aria-hidden="true">↓</span></button>
             </div>
             <dl class="hero-stats" aria-label="题库数据">
-              <div><dt id="paper-total">36</dt><dd>套模拟试卷</dd></div>
+              <div><dt id="paper-total">1</dt><dd>套可用试卷</dd></div>
               <div><dt>4</dt><dd>大题型覆盖</dd></div>
               <div><dt>随时</dt><dd>保存学习进度</dd></div>
             </dl>
@@ -91,13 +91,13 @@
           <div class="progress-copy">
             <p class="section-kicker">LEARNING DASHBOARD</p>
             <h2 id="progress-title">今天，继续上次的练习</h2>
-            <p>2025 年 6 月 · 第 2 套，还剩阅读理解与翻译。</p>
+            <p>继续本地完整真题，进度会在完整试卷阅读器中自动保存。</p>
           </div>
-          <div class="continue-progress" aria-label="当前练习进度 46%">
-            <div class="progress-label"><span>完成进度</span><strong id="continue-value">46%</strong></div>
-            <div class="progress-track"><span id="continue-bar" style="width: 46%"></span></div>
+          <div class="continue-progress" aria-label="当前练习进度 0%">
+            <div class="progress-label"><span>完成进度</span><strong id="continue-value">0%</strong></div>
+            <div class="progress-track"><span id="continue-bar" style="width: 0%"></span></div>
           </div>
-          <button class="continue-button" type="button" data-paper-id="2025-06-02">继续练习 <span aria-hidden="true">→</span></button>
+          <button class="continue-button" type="button" data-paper-id="2021-06-01">继续练习 <span aria-hidden="true">→</span></button>
         </section>
 
         <section class="method-section" id="method" aria-labelledby="method-title">
@@ -194,6 +194,6 @@
     <div id="dialog-backdrop" class="dialog-backdrop" hidden></div>
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
-    <script src="js/home.js"></script>
+    <script src="js/home.js?v=20260824-unified-reader-3"></script>
   </body>
 </html>

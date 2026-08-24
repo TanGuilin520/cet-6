@@ -11,6 +11,13 @@ __pycache__/
 # Dynamically generated pronunciation audio
 public/assets/audio/cache/
 
+# Open dictionary metadata and downloaded pronunciation cache
+data/dictionary-cache/
+
+# Local coding-agent workspace
+.omo/
+.codegraph
+
 # Large local reference archives (PDF/MP3); use Git LFS if versioning is needed
 data/reference/*
 !data/reference/README.md

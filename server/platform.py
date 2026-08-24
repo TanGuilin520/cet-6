@@ -49,6 +49,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 EXAMS_DIR = PROJECT_ROOT / "data" / "exams"
 XHTML_NAMESPACE = {"x": "http://www.w3.org/1999/xhtml"}
 
+# Stable, read-only paper identities are intentionally separate from uploaded
+# ``exam-*`` directories.  A built-in paper may reuse a ready runtime bundle
+# only when the upload metadata carries the exact source digest.  This avoids
+# title matching and keeps generated/random exam IDs out of the public
+# contract.
+BUILTIN_PAPERS: dict[str, dict[str, object]] = {
+    "2021-06-01": {
+        "sourceSha256": "688e243765c218d42d2a5fc5b54adb34247e6b3549da0a86ad2a39623d03a670",
+        "assetRoot": PROJECT_ROOT / "public" / "assets" / "papers" / "2021-06-set-01",
+    },
+}
+
 MAX_UPLOAD_BYTES = 460 * 1024 * 1024
 MAX_PDF_BYTES = 80 * 1024 * 1024
 MAX_AUDIO_BYTES = 300 * 1024 * 1024
@@ -66,6 +78,7 @@ DEEPSEEK_TIMEOUT_SECONDS = 60
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
 
 SAFE_EXAM_ID = re.compile(r"^exam-[0-9]{8}-[0-9a-f]{12}$")
+SAFE_BUILTIN_PAPER_ID = re.compile(r"^[0-9]{4}-(?:06|12)-0[1-3]$")
 SAFE_PAGE_ASSET = re.compile(r"^page-[1-9][0-9]{0,2}\.jpg$")
 SAFE_QUESTION_ID = re.compile(
     r"^(?:q([1-9][0-9]{0,2})|(writing|translation)-([1-9][0-9]{0,2}))$"
@@ -1912,6 +1925,107 @@ class PlatformService:
             raise PlatformError("exam not found", HTTPStatus.NOT_FOUND)
         return document
 
+    @staticmethod
+    def _metadata_paper_sha256(metadata: object) -> str | None:
+        if not isinstance(metadata, dict):
+            return None
+        paper = metadata.get("paper")
+        digest = paper.get("sha256") if isinstance(paper, dict) else None
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9A-Fa-f]{64}", digest):
+            return None
+        return digest.lower()
+
+    @staticmethod
+    def _builtin_paper_config(paper_id: str) -> dict[str, object]:
+        if not SAFE_BUILTIN_PAPER_ID.fullmatch(paper_id):
+            raise PlatformError("built-in paper not found", HTTPStatus.NOT_FOUND)
+        config = BUILTIN_PAPERS.get(paper_id)
+        if not isinstance(config, dict):
+            raise PlatformError("built-in paper not found", HTTPStatus.NOT_FOUND)
+        return config
+
+    def _ready_runtime_exam_id(self, paper_id: str) -> str | None:
+        """Resolve a stable paper to a ready upload by its source digest only."""
+
+        config = self._builtin_paper_config(paper_id)
+        expected_digest = str(config.get("sourceSha256") or "")
+        candidates: list[tuple[str, str]] = []
+        with self._lock:
+            for directory in EXAMS_DIR.glob("exam-*"):
+                if not directory.is_dir() or not SAFE_EXAM_ID.fullmatch(directory.name):
+                    continue
+                try:
+                    # Resolve through the existing upload boundary so a symlink
+                    # cannot turn the digest scan into an arbitrary file read.
+                    safe_directory = _safe_exam_directory(directory.name)
+                except PlatformError:
+                    continue
+                status = _read_json(safe_directory / "status.json", {})
+                metadata = _read_json(safe_directory / "metadata.json", {})
+                if (
+                    not isinstance(status, dict)
+                    or status.get("status") != "ready"
+                    or self._metadata_paper_sha256(metadata) != expected_digest
+                ):
+                    continue
+                candidates.append((str(status.get("updatedAt") or ""), directory.name))
+        if not candidates:
+            return None
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+
+    def builtin_document_with_revision(
+        self,
+        paper_id: str,
+        name: str,
+    ) -> tuple[dict[str, object], int]:
+        if name not in {"questions", "answers"}:
+            raise PlatformError("built-in paper document not found", HTTPStatus.NOT_FOUND)
+        config = self._builtin_paper_config(paper_id)
+        runtime_exam_id = self._ready_runtime_exam_id(paper_id)
+        if runtime_exam_id:
+            document, revision = self.document_with_revision(runtime_exam_id, name)
+        else:
+            root = config.get("assetRoot")
+            if not isinstance(root, Path):
+                raise PlatformError("built-in paper document not found", HTTPStatus.NOT_FOUND)
+            document = _read_json(root / f"{name}.json")
+            if not isinstance(document, dict):
+                raise PlatformError("built-in paper document not found", HTTPStatus.NOT_FOUND)
+            revision = 0
+        # The stable route never leaks its current runtime alias as document
+        # identity.  The nested question/answer schema remains unchanged.
+        response = dict(document)
+        response["examId"] = paper_id
+        return response, revision
+
+    def builtin_manifest(self, paper_id: str) -> dict[str, object]:
+        config = self._builtin_paper_config(paper_id)
+        root = config.get("assetRoot")
+        if not isinstance(root, Path):
+            raise PlatformError("built-in paper manifest not found", HTTPStatus.NOT_FOUND)
+        document = _read_json(root / "manifest.json")
+        if not isinstance(document, dict):
+            raise PlatformError("built-in paper manifest not found", HTTPStatus.NOT_FOUND)
+        response = dict(document)
+        response["id"] = paper_id
+        response["audioUrl"] = None
+        runtime_exam_id = self._ready_runtime_exam_id(paper_id)
+        if runtime_exam_id:
+            try:
+                self.audio_path(runtime_exam_id)
+                response["audioUrl"] = f"/api/papers/{paper_id}/audio"
+            except PlatformError:
+                pass
+        return response
+
+    def builtin_audio_path(self, paper_id: str) -> tuple[Path, str, str]:
+        self._builtin_paper_config(paper_id)
+        runtime_exam_id = self._ready_runtime_exam_id(paper_id)
+        if not runtime_exam_id:
+            raise PlatformError("this built-in paper has no available listening audio", HTTPStatus.NOT_FOUND)
+        return self.audio_path(runtime_exam_id)
+
     def list_exams(self) -> dict[str, object]:
         exams: list[dict[str, object]] = []
         for directory in EXAMS_DIR.glob("exam-*"):
@@ -1921,6 +2035,24 @@ class PlatformService:
             metadata = _read_json(directory / "metadata.json", {})
             if not isinstance(status, dict) or not isinstance(metadata, dict):
                 continue
+            question_count = 0
+            answer_count = 0
+            try:
+                snapshot, _, _ = self._current_review_snapshot(directory.name)
+                questions_document, answers_document = self._snapshot_documents(snapshot)
+                question_items = questions_document.get("questions")
+                answer_items = answers_document.get("answers")
+                question_count = len(question_items) if isinstance(question_items, list) else 0
+                answer_count = len(answer_items) if isinstance(answer_items, list) else 0
+            except PlatformError:
+                # Queued, failed, or locally damaged exams remain visible in the
+                # upload history without being advertised as feature-ready.
+                pass
+            try:
+                self.audio_path(directory.name)
+                has_audio = True
+            except PlatformError:
+                has_audio = False
             exams.append(
                 {
                     "examId": directory.name,
@@ -1932,8 +2064,11 @@ class PlatformService:
                     "error": status.get("error"),
                     "createdAt": status.get("createdAt"),
                     "updatedAt": status.get("updatedAt"),
-                    "hasAnswer": bool(metadata.get("answer")),
-                    "hasAudio": bool(metadata.get("audio")),
+                    "paperSha256": self._metadata_paper_sha256(metadata),
+                    "questionCount": question_count,
+                    "answerCount": answer_count,
+                    "hasAnswer": answer_count > 0,
+                    "hasAudio": has_audio,
                     "result": status.get("result"),
                 }
             )
@@ -2651,6 +2786,14 @@ class PlatformService:
                 if status.get("status") == "failed":
                     raise PlatformError(str(status.get("error") or "exam parsing failed"), HTTPStatus.UNPROCESSABLE_ENTITY)
                 raise PlatformError("exam document is not ready", HTTPStatus.CONFLICT)
+            if name == "manifest":
+                response = dict(document)
+                try:
+                    self.audio_path(exam_id)
+                    response["audioUrl"] = f"/api/exams/{exam_id}/audio"
+                except PlatformError:
+                    response["audioUrl"] = None
+                document = response
             return document, revision
 
     def document(self, exam_id: str, name: str) -> dict[str, object]:
@@ -2959,7 +3102,14 @@ class PlatformService:
                 )
         return response
 
-    def assistant(self, exam_id: str, payload: dict[str, object]) -> dict[str, object]:
+    def assistant(
+        self,
+        exam_id: str,
+        payload: dict[str, object],
+        *,
+        _read_only_documents: tuple[dict[str, object], dict[str, object]] | None = None,
+        _read_only_revision: int = 0,
+    ) -> dict[str, object]:
         allowed = {"questionId", "message", "userAnswer", "history", "reviewRevision"}
         if set(payload) - allowed:
             raise PlatformError("assistant request contains unsupported fields")
@@ -2996,14 +3146,27 @@ class PlatformService:
 
         # Resolve the revision once so question, answer, and RAG evidence cannot
         # come from different review snapshots during an atomic publication.
+        # Built-in fallback documents are immutable repository assets and enter
+        # through the private read-only branch without resolving an upload path.
         with self._lock:
-            snapshot, revision, _ = self._current_review_snapshot(exam_id)
+            if _read_only_documents is None:
+                snapshot, revision, _ = self._current_review_snapshot(exam_id)
+                questions_document, answers_document = self._snapshot_documents(snapshot)
+            else:
+                if (
+                    isinstance(_read_only_revision, bool)
+                    or not isinstance(_read_only_revision, int)
+                    or _read_only_revision < 0
+                ):
+                    raise PlatformError("built-in paper revision is invalid", HTTPStatus.INTERNAL_SERVER_ERROR)
+                snapshot = None
+                revision = _read_only_revision
+                questions_document, answers_document = _read_only_documents
             if expected_revision is not None and expected_revision != revision:
                 raise PlatformError(
                     f"review revision changed; current revision is {revision}",
                     HTTPStatus.CONFLICT,
                 )
-            questions_document, answers_document = self._snapshot_documents(snapshot)
             questions = questions_document.get("questions", [])
             question = next((item for item in questions if isinstance(item, dict) and item.get("questionId") == question_id), None)
             if question is None:
@@ -3013,7 +3176,28 @@ class PlatformService:
             retrieval_query = " ".join(
                 [question_id, str(question.get("stem") or ""), str(message), str(user_answer or "")]
             )
-            exact, vector = self._retrieve(exam_id, question_id, retrieval_query, snapshot=snapshot)
+            if snapshot is not None:
+                exact, vector = self._retrieve(exam_id, question_id, retrieval_query, snapshot=snapshot)
+            else:
+                exact = []
+                if official:
+                    content = " ".join(
+                        part
+                        for part in (
+                            question_id,
+                            f"answer {official.get('answer')}",
+                            str(official.get("explanation") or "").strip(),
+                        )
+                        if part
+                    )
+                    exact.append(
+                        {
+                            "questionId": question_id,
+                            "kind": "official_answer",
+                            "content": content[:8_000],
+                        }
+                    )
+                vector = []
         official_explanation_found = bool(official and str(official.get("explanation") or "").strip())
         disclaimer = "" if official_explanation_found else "答案资料中没有找到官方解析，以下为 AI 辅助分析。"
         reply = self._grounded_fallback(question_id, question, official, user_answer, disclaimer)
@@ -3102,6 +3286,29 @@ class PlatformService:
             }
         return response
 
+    def builtin_assistant(self, paper_id: str, payload: dict[str, object]) -> dict[str, object]:
+        config = self._builtin_paper_config(paper_id)
+        runtime_exam_id = self._ready_runtime_exam_id(paper_id)
+        if runtime_exam_id:
+            response = self.assistant(runtime_exam_id, payload)
+        else:
+            root = config.get("assetRoot")
+            if not isinstance(root, Path):
+                raise PlatformError("built-in paper documents are unavailable", HTTPStatus.NOT_FOUND)
+            questions_document = _read_json(root / "questions.json")
+            answers_document = _read_json(root / "answers.json")
+            if not isinstance(questions_document, dict) or not isinstance(answers_document, dict):
+                raise PlatformError("built-in paper documents are unavailable", HTTPStatus.NOT_FOUND)
+            response = self.assistant(
+                paper_id,
+                payload,
+                _read_only_documents=(questions_document, answers_document),
+                _read_only_revision=0,
+            )
+        stable_response = dict(response)
+        stable_response["examId"] = paper_id
+        return stable_response
+
     @staticmethod
     def _grounded_fallback(
         question_id: str,
@@ -3117,6 +3324,8 @@ class PlatformService:
         if official:
             if official.get("source") == "human_review":
                 parts.append(f"人工复核后的答案记录给出的正确答案是 {official.get('answer')}。")
+            elif official.get("source") == "builtin_answer":
+                parts.append(f"本地答案资料明确给出的正确答案是 {official.get('answer')}。")
             else:
                 parts.append(f"你上传的答案资料明确给出的正确答案是 {official.get('answer')}。")
             explanation = str(official.get("explanation") or "").strip()
@@ -3221,6 +3430,12 @@ class PlatformAPI:
     REVIEW_SUGGESTION_ROUTE = re.compile(
         r"^/api/exams/(exam-[0-9]{8}-[0-9a-f]{12})/agent/review-suggestions$"
     )
+    BUILTIN_DETAIL_ROUTE = re.compile(
+        r"^/api/papers/([0-9]{4}-(?:06|12)-0[1-3])/(manifest|questions|answers|audio)$"
+    )
+    BUILTIN_ASSISTANT_ROUTE = re.compile(
+        r"^/api/papers/([0-9]{4}-(?:06|12)-0[1-3])/assistant$"
+    )
 
     def __init__(self) -> None:
         self.service = PlatformService()
@@ -3244,12 +3459,42 @@ class PlatformAPI:
 
     def handle_get(self, handler, parsed, include_body: bool = True) -> bool:
         path = parsed.path.rstrip("/") or "/"
-        if not path.startswith("/api/exams"):
+        if not (path.startswith("/api/exams") or path.startswith("/api/papers")):
             return False
         if parsed.query:
             handler._json_error(HTTPStatus.BAD_REQUEST, "query parameters are not supported")
             return True
         try:
+            builtin = self.BUILTIN_DETAIL_ROUTE.fullmatch(path)
+            if builtin:
+                paper_id, resource = builtin.groups()
+                if resource == "manifest":
+                    handler._json_response(
+                        HTTPStatus.OK,
+                        self.service.builtin_manifest(paper_id),
+                        include_body=include_body,
+                    )
+                elif resource in {"questions", "answers"}:
+                    document, revision = self.service.builtin_document_with_revision(paper_id, resource)
+                    requested_etag = handler.headers.get("If-Match", "").strip()
+                    if requested_etag and _parse_review_etag(requested_etag) != revision:
+                        raise PlatformError(
+                            f"review revision changed; current revision is {revision}",
+                            HTTPStatus.PRECONDITION_FAILED,
+                        )
+                    handler._json_response(
+                        HTTPStatus.OK,
+                        document,
+                        include_body=include_body,
+                        extra_headers={"ETag": _review_etag(revision)},
+                    )
+                else:
+                    self._serve_file(
+                        handler,
+                        *self.service.builtin_audio_path(paper_id),
+                        include_body=include_body,
+                    )
+                return True
             if path == "/api/exams/capabilities":
                 handler._json_response(HTTPStatus.OK, self.service.capabilities(), include_body=include_body)
                 return True
@@ -3363,7 +3608,7 @@ class PlatformAPI:
 
     def handle_post(self, handler, parsed) -> bool:
         path = parsed.path.rstrip("/") or "/"
-        if not path.startswith("/api/exams"):
+        if not (path.startswith("/api/exams") or path.startswith("/api/papers")):
             return False
         if parsed.query:
             handler._json_error(HTTPStatus.BAD_REQUEST, "query parameters are not supported")
@@ -3372,6 +3617,12 @@ class PlatformAPI:
             handler._json_error(HTTPStatus.FORBIDDEN, "cross-origin requests are not allowed")
             return True
         try:
+            builtin_assistant = self.BUILTIN_ASSISTANT_ROUTE.fullmatch(path)
+            if builtin_assistant:
+                payload = self._read_json_body(handler)
+                response = self.service.builtin_assistant(builtin_assistant.group(1), payload)
+                handler._json_response(HTTPStatus.OK, response)
+                return True
             if path == "/api/exams/upload":
                 response = self.service.create_from_multipart(handler)
                 handler._json_response(HTTPStatus.ACCEPTED, response)

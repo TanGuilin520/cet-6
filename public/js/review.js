@@ -9,6 +9,7 @@
   const LONG_TYPES = new Set(['writing', 'translation']);
   const OPTION_LABELS = 'ABCDEFGHIJKLMNO';
   const GENERIC_REASONS = new Set(['修改', '调整', '复核', '确认', '修正', 'update', 'edit', 'review']);
+  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=2`;
 
   const workspace = $('#review-workspace');
   const fatalState = $('#fatal-state');
@@ -1094,7 +1095,7 @@
     $('#exam-title').textContent = text(manifest?.title, 180) || `试卷 ${state.examId}`;
     $('#revision-label').textContent = `复核版本 r${state.revision} · ${state.issues.length} 项待处理`;
     const reader = $('#open-reader');
-    reader.href = `reader.html?paper=${encodeURIComponent(state.examId)}`;
+    reader.href = unifiedReaderUrl(state.examId);
     reader.removeAttribute('aria-disabled');
     reader.removeAttribute('tabindex');
     window.document.title = `${text(manifest?.title, 100) || '试卷'} · 解析复核`;
