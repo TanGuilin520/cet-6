@@ -21,8 +21,10 @@ import mimetypes
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import threading
 import unicodedata
@@ -76,6 +78,127 @@ PDF_TIMEOUT_SECONDS = 180
 OCR_TIMEOUT_SECONDS = 900
 DEEPSEEK_TIMEOUT_SECONDS = 60
 DEEPSEEK_API_URL = "https://api.deepseek.com/chat/completions"
+# deepseek-chat / deepseek-reasoner were retired by DeepSeek after 2026-07-24.
+# Legacy configured names keep working through this explicit mapping.
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-flash"
+SUPPORTED_DEEPSEEK_MODELS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+DEEPSEEK_MODEL_ALIASES = {
+    "deepseek-chat": "deepseek-v4-flash",
+    "deepseek-reasoner": "deepseek-v4-pro",
+}
+SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+
+_deprecation_notice_shown = False
+
+
+def resolve_deepseek_model(raw: object) -> tuple[str, str]:
+    """Resolve a configured model to a supported one, mapping legacy names.
+
+    Returns ``(model, deprecation_notice)``; an empty model means the name is
+    unsupported.  Notices never contain secrets.
+    """
+
+    global _deprecation_notice_shown
+    name = str(raw or "").strip()
+    if not name:
+        return DEEPSEEK_DEFAULT_MODEL, ""
+    mapped = DEEPSEEK_MODEL_ALIASES.get(name)
+    if mapped:
+        notice = f"DeepSeek model '{name}' is deprecated; using '{mapped}'"
+        if not _deprecation_notice_shown:
+            _deprecation_notice_shown = True
+            print(f"[deprecated] {notice}", file=sys.stderr, flush=True)
+        return mapped, notice
+    if name in SUPPORTED_DEEPSEEK_MODELS:
+        return name, ""
+    notice = f"configured model '{name[:64]}' is unsupported; falling back to '{DEEPSEEK_DEFAULT_MODEL}'"
+    if not _deprecation_notice_shown:
+        _deprecation_notice_shown = True
+        print(f"[config] {notice}", file=sys.stderr, flush=True)
+    return DEEPSEEK_DEFAULT_MODEL, notice
+
+
+def deterministic_generation(
+    fallback_reason: str,
+    *,
+    attempted: bool = False,
+) -> dict[str, object]:
+    return {
+        "provider": "deterministic",
+        "model": None,
+        "attempted": attempted,
+        "used": False,
+        "fallbackReason": fallback_reason,
+        "usage": None,
+    }
+
+
+MAX_AGENT_EVIDENCE_ITEMS = 32
+MAX_AGENT_EVIDENCE_ITEM_CHARS = 12_000
+MAX_AGENT_EVIDENCE_TOTAL_CHARS = 96_000
+
+
+def _bounded_agent_evidence(
+    exact: list[dict[str, object]],
+    vector: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Shape retrieval results into the sidecar's strict evidence contract.
+
+    Items without a well-formed question id cannot be attributed and are
+    dropped instead of weakening the agent-side validation that guards the
+    untrusted evidence channel.
+    """
+
+    def clean(items: list[dict[str, object]]) -> list[dict[str, object]]:
+        cleaned: list[dict[str, object]] = []
+        for item in items:
+            question_id = str(item.get("questionId") or "").strip()
+            if not SAFE_QUESTION_ID.fullmatch(question_id):
+                continue
+            content = str(item.get("content") or "")[:MAX_AGENT_EVIDENCE_ITEM_CHARS]
+            if not content.strip():
+                continue
+            cleaned.append({**item, "questionId": question_id, "content": content})
+        return cleaned
+
+    bounded_exact = clean(exact)
+    remaining = MAX_AGENT_EVIDENCE_ITEMS - len(bounded_exact)
+    bounded_vector = clean(vector)[: max(0, remaining)]
+    total_chars = 0
+    kept_exact: list[dict[str, object]] = []
+    kept_vector: list[dict[str, object]] = []
+    for group in (kept_exact, bounded_exact), (kept_vector, bounded_vector):
+        destination, source = group
+        for item in source:
+            size = len(str(item["content"]))
+            if total_chars + size > MAX_AGENT_EVIDENCE_TOTAL_CHARS:
+                break
+            total_chars += size
+            destination.append(item)
+    return kept_exact, kept_vector
+
+
+def _deepseek_key() -> str:
+    """Return the configured server-side key, or '' for template values."""
+
+    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    return "" if api_key in {"YOUR_DEEPSEEK_API_KEY", "PASTE_YOUR_DEEPSEEK_API_KEY_HERE"} else api_key
+
+
+def _sanitize_deepseek_usage(value: object) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    sanitized: dict[str, int] = {}
+    for source_name, target_name in (
+        ("prompt_tokens", "promptTokens"),
+        ("completion_tokens", "completionTokens"),
+        ("total_tokens", "totalTokens"),
+    ):
+        raw_number = value.get(source_name)
+        if isinstance(raw_number, bool) or not isinstance(raw_number, int) or not 0 <= raw_number < 10_000_000:
+            return None
+        sanitized[target_name] = raw_number
+    return sanitized
 
 SAFE_EXAM_ID = re.compile(r"^exam-[0-9]{8}-[0-9a-f]{12}$")
 SAFE_BUILTIN_PAPER_ID = re.compile(r"^[0-9]{4}-(?:06|12)-0[1-3]$")
@@ -2127,6 +2250,8 @@ class PlatformService:
             "langgraphImportReady": False,
             "checkpointReady": False,
             "deepseekConfigured": False,
+            "deepseekKeyPresent": False,
+            "model": None,
             "message": "未配置 Agent runtime",
         }
         try:
@@ -2143,6 +2268,9 @@ class PlatformService:
                         "langgraphImportReady": bool(agent_health["langgraphImportReady"]),
                         "checkpointReady": bool(agent_health["checkpointReady"]),
                         "deepseekConfigured": bool(agent_health["deepseekConfigured"]),
+                        "deepseekKeyPresent": bool(agent_health.get("deepseekKeyPresent")),
+                        "model": agent_health.get("deepseekModel"),
+                        "deepseekModel": agent_health.get("deepseekModel"),
                         "message": (
                             "Agent runtime 可用"
                             if agent_health["ready"]
@@ -3110,7 +3238,7 @@ class PlatformService:
         _read_only_documents: tuple[dict[str, object], dict[str, object]] | None = None,
         _read_only_revision: int = 0,
     ) -> dict[str, object]:
-        allowed = {"questionId", "message", "userAnswer", "history", "reviewRevision"}
+        allowed = {"questionId", "message", "userAnswer", "history", "reviewRevision", "requestId"}
         if set(payload) - allowed:
             raise PlatformError("assistant request contains unsupported fields")
         question_id = payload.get("questionId")
@@ -3201,69 +3329,99 @@ class PlatformService:
         official_explanation_found = bool(official and str(official.get("explanation") or "").strip())
         disclaimer = "" if official_explanation_found else "答案资料中没有找到官方解析，以下为 AI 辅助分析。"
         reply = self._grounded_fallback(question_id, question, official, user_answer, disclaimer)
+        raw_request_id = str(payload.get("requestId") or "").strip()
+        request_id = raw_request_id if SAFE_REQUEST_ID.fullmatch(raw_request_id) else uuid.uuid4().hex[:24]
+        agent_client = AgentClient.from_environment()
+        agent_configured = agent_client.configured
         agent_response: dict[str, object] | None = None
-        try:
-            agent_client = AgentClient.from_environment()
-            if agent_client.configured:
-                agent_response = agent_client.tutor(
-                    {
-                        "examId": exam_id,
-                        "questionId": question_id,
-                        "reviewRevision": revision,
-                        "message": message.strip(),
-                        "userAnswer": user_answer,
-                        "history": clean_history,
-                        "context": {
-                            "question": question,
-                            "officialAnswer": official,
-                            "evidence": {"exact": exact, "vector": vector},
-                            "officialExplanationFound": official_explanation_found,
-                            "disclaimer": disclaimer,
-                            "policy": "question_id_exact_then_vector_context",
-                        },
-                    }
-                )
+        if agent_configured:
+            # Exactly one model path per user request: when the sidecar is
+            # configured it owns the DeepSeek call (its own internal fallback
+            # keeps the reply deterministic on model failure).  Transport
+            # failures here fall back to the local answer only - never to a
+            # second direct DeepSeek request that could double-bill.
+            try:
+                agent_exact, agent_vector = _bounded_agent_evidence(exact, vector)
+                agent_payload: dict[str, object] = {
+                    "examId": exam_id,
+                    "questionId": question_id,
+                    "reviewRevision": revision,
+                    "message": message.strip(),
+                    "userAnswer": user_answer,
+                    "history": clean_history,
+                    "requestId": request_id,
+                    "context": {
+                        "question": question,
+                        "officialAnswer": official,
+                        "evidence": {"exact": agent_exact, "vector": agent_vector},
+                        "officialExplanationFound": official_explanation_found,
+                        "disclaimer": disclaimer,
+                        "policy": "question_id_exact_then_vector_context",
+                    },
+                }
+                agent_response = agent_client.tutor(agent_payload)
                 if (
                     not isinstance(agent_response, dict)
                     or agent_response.get("examId") != exam_id
                     or agent_response.get("questionId") != question_id
                     or agent_response.get("reviewRevision") != revision
+                    or agent_response.get("requestId") != request_id
                 ):
                     raise AgentProtocolError("Agent tutor response identity does not match the fixed snapshot")
                 reply = str(agent_response["reply"])
                 if disclaimer and disclaimer not in reply:
                     reply = f"{disclaimer}\n\n{reply}"
-        except AgentClientError:
-            # The Agent runtime is optional.  Any configuration, transport, or
-            # response-contract failure preserves the established deterministic
-            # and direct-DeepSeek assistant path.
-            agent_response = None
+            except AgentClientError:
+                # The Agent runtime is optional.  Any configuration, transport,
+                # or response-contract failure preserves the established
+                # deterministic assistant path without a second model call.
+                agent_response = None
 
-        api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-        if agent_response is None and api_key and api_key not in {
-            "YOUR_DEEPSEEK_API_KEY",
-            "PASTE_YOUR_DEEPSEEK_API_KEY_HERE",
-        }:
-            try:
-                reply = self._deepseek_assistant_reply(
-                    api_key,
-                    question_id,
-                    question,
-                    official,
-                    user_answer,
-                    message.strip(),
-                    clean_history,
-                    exact,
-                    vector,
-                    disclaimer,
-                )
-            except PlatformError as error:
-                reply += f"\n\nAI 服务暂时不可用（{error.message}），以上仅展示已检索到的答案资料。"
+        generation: dict[str, object]
+        api_key_configured = _deepseek_key() != ""
+        if agent_response is not None:
+            generation_value = agent_response.get("generation")
+            generation = generation_value if isinstance(generation_value, dict) else deterministic_generation("not_configured")
+        elif not agent_configured and api_key_configured:
+            outcome = self._deepseek_assistant_reply(
+                question_id,
+                question,
+                official,
+                user_answer,
+                message.strip(),
+                clean_history,
+                exact,
+                vector,
+                disclaimer,
+            )
+            generation = dict(outcome["generation"])
+            if outcome["reply"]:
+                reply = str(outcome["reply"])
+            else:
+                reason_labels = {
+                    "upstream_auth_error": "上游拒绝了服务端凭证",
+                    "upstream_rate_limited": "上游限流",
+                    "upstream_server_error": "上游 AI 服务暂不可用",
+                    "upstream_timeout": "上游 AI 请求超时",
+                    "invalid_response": "上游返回无效内容",
+                }
+                label = reason_labels.get(str(generation.get("fallbackReason")))
+                if label:
+                    reply += f"\n\nAI 服务暂时不可用（{label}），以上仅展示已检索到的答案资料。"
+        else:
+            # Agent 未配置且无可用 Key：保持完全确定性回答。已配置但不可达时
+            # 明确报告传输层失败，绝不回退到第二次模型调用。
+            generation = deterministic_generation(
+                "agent_transport_error" if agent_configured else "not_configured",
+                attempted=agent_configured,
+            )
         response: dict[str, object] = {
             "examId": exam_id,
             "questionId": question_id,
             "revision": revision,
+            "requestId": request_id,
             "reply": reply,
+            "generation": generation,
             "grounding": {
                 "officialExplanationFound": official_explanation_found,
                 "exactMatches": len(exact),
@@ -3339,9 +3497,8 @@ class PlatformService:
             parts.append("答案资料中也没有识别到本题的明确答案；为避免猜测，系统不会生成正确选项。")
         return "\n\n".join(part for part in parts if part)
 
-    @staticmethod
     def _deepseek_assistant_reply(
-        api_key: str,
+        self,
         question_id: str,
         question: dict[str, object],
         official: dict[str, object] | None,
@@ -3351,7 +3508,14 @@ class PlatformService:
         exact: list[dict[str, object]],
         vector: list[dict[str, object]],
         disclaimer: str,
-    ) -> str:
+    ) -> dict[str, object]:
+        """One bounded direct DeepSeek call for the legacy no-Agent path.
+
+        Returns ``{"reply": str|None, "generation": {...}}``; ``reply`` stays
+        ``None`` on any failure so the caller keeps the deterministic answer.
+        """
+
+        model, _notice = resolve_deepseek_model(os.environ.get("CET_AGENT_DEEPSEEK_MODEL") or os.environ.get("DEEPSEEK_MODEL"))
         evidence_parts = [f"当前题目 JSON：{json.dumps(question, ensure_ascii=False)}"]
         if official:
             evidence_parts.append(f"当前题明确答案记录：{json.dumps(official, ensure_ascii=False)}")
@@ -3362,7 +3526,8 @@ class PlatformService:
         system = (
             "你是 CET 试卷辅导助手。回答必须先使用题号精确检索到的用户上传答案资料；"
             "向量结果只能补充背景，不能据此推断或更改当前题正确答案。清楚区分官方资料和 AI 分析，"
-            "引用原文依据；资料不足就明确说不知道，禁止编造。"
+            "不得把 AI 分析伪装成官方答案；引用原文依据；资料不足就明确说不知道，禁止编造。"
+            "不要输出隐藏思维链。"
         )
         if disclaimer:
             system += f" 当前题没有找到官方解析，回答开头必须原样包含：{disclaimer}"
@@ -3372,11 +3537,12 @@ class PlatformService:
         )[:28_000]
         request_body = json.dumps(
             {
-                "model": os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"),
+                "model": model,
                 "messages": [{"role": "system", "content": system}, *history, {"role": "user", "content": user_content}],
                 "stream": False,
                 "temperature": 0.2,
                 "max_tokens": 1_400,
+                "response_format": {"type": "json_object"},
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -3385,35 +3551,58 @@ class PlatformService:
             method="POST",
             data=request_body,
             headers={
-                "Authorization": f"Bearer {api_key}",
+                "Authorization": f"Bearer {_deepseek_key()}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "CET-Exam-Platform/1.0",
             },
         )
+
+        def failed(reason: str) -> dict[str, object]:
+            return {"reply": None, "generation": deterministic_generation(reason, attempted=True)}
+
         try:
             with urlopen(request, timeout=DEEPSEEK_TIMEOUT_SECONDS) as response:
+                media_type = response.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
                 raw = response.read(128 * 1024 + 1)
         except HTTPError as error:
             try:
                 error.read(4096)
             except OSError:
                 pass
-            raise PlatformError("上游 AI 请求失败", HTTPStatus.BAD_GATEWAY)
-        except (URLError, OSError, TimeoutError):
-            raise PlatformError("上游 AI 暂时不可用", HTTPStatus.BAD_GATEWAY)
-        if len(raw) > 128 * 1024:
-            raise PlatformError("上游 AI 响应过大", HTTPStatus.BAD_GATEWAY)
+            if error.code in {HTTPStatus.UNAUTHORIZED, HTTPStatus.FORBIDDEN}:
+                return failed("upstream_auth_error")
+            if error.code == HTTPStatus.TOO_MANY_REQUESTS:
+                return failed("upstream_rate_limited")
+            return failed("upstream_server_error")
+        except (URLError, OSError):
+            return failed("upstream_server_error")
+        except (TimeoutError, socket.timeout):
+            return failed("upstream_timeout")
+        if media_type != "application/json" or len(raw) > 128 * 1024:
+            return failed("invalid_response")
         try:
-            reply = json.loads(raw.decode("utf-8"))["choices"][0]["message"]["content"]
+            document = json.loads(raw.decode("utf-8"))
+            reply = document["choices"][0]["message"]["content"]
+            usage = _sanitize_deepseek_usage(document.get("usage"))
         except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError):
-            raise PlatformError("上游 AI 返回了无效响应", HTTPStatus.BAD_GATEWAY)
+            return failed("invalid_response")
         if not isinstance(reply, str) or not reply.strip():
-            raise PlatformError("上游 AI 返回了空响应", HTTPStatus.BAD_GATEWAY)
+            return failed("invalid_response")
         cleaned = reply.strip()
+        if len(cleaned) > 64_000:
+            return failed("invalid_response")
         if disclaimer and disclaimer not in cleaned:
             cleaned = f"{disclaimer}\n\n{cleaned}"
-        return cleaned
+        generation = {
+            "provider": "deepseek",
+            "model": model,
+            "attempted": True,
+            "used": True,
+            "fallbackReason": None,
+            "usage": usage,
+        }
+        return {"reply": cleaned, "generation": generation}
 
 
 class PlatformAPI:

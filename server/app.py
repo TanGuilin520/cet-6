@@ -32,7 +32,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 from .dictionary import DICTIONARY_SERVICE, DictionaryError
-from .platform import PLATFORM_API
+from .platform import PLATFORM_API, resolve_deepseek_model
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = PROJECT_ROOT / "public"
@@ -54,7 +54,6 @@ MAX_CHAT_MESSAGES = 24
 MAX_CHAT_MESSAGE_CHARS = 12_000
 MAX_CHAT_TOTAL_CHARS = 32_000
 DEEPSEEK_TIMEOUT_SECONDS = 60
-ALLOWED_DEEPSEEK_MODELS = frozenset({"deepseek-chat", "deepseek-reasoner"})
 DEEPSEEK_KEY_PLACEHOLDERS = frozenset(
     {"YOUR_DEEPSEEK_API_KEY", "PASTE_YOUR_DEEPSEEK_API_KEY_HERE"}
 )
@@ -288,12 +287,15 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
             self._json_error(HTTPStatus.BAD_REQUEST, "request contains unsupported fields")
             return None
 
-        configured_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat").strip()
-        model = document.get("model", configured_model)
-        if not isinstance(model, str) or model not in ALLOWED_DEEPSEEK_MODELS:
+        configured_model = os.environ.get("DEEPSEEK_MODEL", "").strip()
+        raw_model = document.get("model", configured_model)
+        # Only current official DeepSeek models are accepted; retired names map
+        # through resolve_deepseek_model so old clients keep working.
+        model, _notice = resolve_deepseek_model(raw_model)
+        if not isinstance(model, str) or not model:
             self._json_error(
                 HTTPStatus.BAD_REQUEST,
-                "model must be deepseek-chat or deepseek-reasoner",
+                "model must be deepseek-v4-flash or deepseek-v4-pro",
             )
             return None
 

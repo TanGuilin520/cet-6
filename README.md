@@ -138,8 +138,10 @@ cp .env.example .env
 
 ```dotenv
 DEEPSEEK_API_KEY=你的真实 DeepSeek API 密钥
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_MODEL=deepseek-v4-flash
 ```
+
+当前官方模型为 `deepseek-v4-flash`（默认，低延迟）与 `deepseek-v4-pro`（可选，更复杂回答）；已弃用的 `deepseek-chat` / `deepseek-reasoner` 会在启动时映射到新模型并打印一次不含密钥的提示。
 
 保存后重启服务：
 
@@ -164,11 +166,13 @@ POST /api/deepseek
 Content-Type: application/json
 
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "messages": [
     {"role": "user", "content": "请解释 flexible 在本文中的含义。"}
   ]
 }
+
+也可以省略 `model`，由服务器按 `CET_AGENT_DEEPSEEK_MODEL → DEEPSEEK_MODEL → deepseek-v4-flash` 选择默认值。
 ```
 
 成功响应：

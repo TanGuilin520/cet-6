@@ -1182,7 +1182,7 @@
       const response = await fetch('/api/deepseek', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: 'deepseek-chat', messages }),
+        body: JSON.stringify({ messages }),
         signal: controller.signal,
       });
       const data = await response.json().catch(() => ({}));

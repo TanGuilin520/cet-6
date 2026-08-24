@@ -299,6 +299,9 @@ class PlatformAgentIntegrationTests(unittest.TestCase):
             "langgraphImportReady": True,
             "checkpointReady": True,
             "deepseekConfigured": False,
+            "deepseekKeyPresent": False,
+            "model": None,
+            "deepseekModel": None,
             "message": "Agent runtime 可用",
         })
 
@@ -337,7 +340,7 @@ class PlatformAgentIntegrationTests(unittest.TestCase):
 
             def tutor(self, payload):
                 self.payload = payload
-                return tutor_response()
+                return {**tutor_response(), "requestId": payload["requestId"]}
 
         client = ReadyClient()
         with mock.patch("server.platform.AgentClient.from_environment", return_value=client), \

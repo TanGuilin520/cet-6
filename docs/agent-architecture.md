@@ -11,6 +11,18 @@
 
 因此它属于“带 Agent 工作流的智能文档应用”，而不是允许模型任意访问系统的通用自治 Agent。这个边界是有意保留的：OCR、答案绑定、批改和版本发布必须继续可复现、可校验。
 
+## 1.1 模型接入与 generation 元数据
+
+Tutor 图只在 `draft_grounded_reply` 节点调用 DeepSeek（默认 `deepseek-v4-flash`，
+可配置 `deepseek-v4-pro`；旧名自动映射）。每次回答都会带版本化的 `generation`
+元数据：`used=true` 表示回复来自模型，否则为确定性回退并给出固定枚举的
+`fallbackReason`；usage 为官方 token 计数。上游错误正文与凭证不会进入响应、
+日志或 checkpoint。Review 图保持确定性 suggest-only，不调用任何模型。
+
+配置优先级：`CET_AGENT_DEEPSEEK_MODEL` → `DEEPSEEK_MODEL` → `deepseek-v4-flash`。
+Agent 模型超时（默认 25s）必须小于主服务的 Agent transport 超时（默认 40s）；
+主服务在 sidecar 已配置时每请求最多触发一次模型调用，传输失败只回退本地答案。
+
 ## 2. 部署拓扑
 
 ```text

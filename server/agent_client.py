@@ -28,6 +28,23 @@ MAX_RESPONSE_BYTES = 512 * 1024
 MAX_REPLY_CHARS = 64_000
 MAX_COLLECTION_ITEMS = 100
 
+SUPPORTED_TUTOR_SCHEMAS = frozenset({"cet-agent-tutor/1", "cet-agent-tutor/2"})
+SUPPORTED_HEALTH_SCHEMAS = frozenset({"cet-agent-health/1", "cet-agent-health/2"})
+SUPPORTED_GENERATION_PROVIDERS = frozenset({"deepseek", "deterministic"})
+SUPPORTED_FALLBACK_REASONS = frozenset(
+    {
+        "not_configured",
+        "invalid_configuration",
+        "blocked_mutation",
+        "upstream_timeout",
+        "upstream_auth_error",
+        "upstream_rate_limited",
+        "upstream_server_error",
+        "invalid_response",
+        "agent_transport_error",
+    }
+)
+
 
 class AgentClientError(RuntimeError):
     """Base error raised by the optional Agent adapter."""
@@ -125,6 +142,61 @@ def _validate_trace(value: object) -> dict[str, object]:
     nodes = _string_list(trace["nodes"], "trace.nodes", 64)
     duration = _integer(trace["durationMs"], "trace.durationMs", maximum=86_400_000)
     return {"nodes": nodes, "durationMs": duration}
+
+
+def _validate_generation(value: object) -> dict[str, object]:
+    """Validate the versioned model-generation metadata (tutor schema /2)."""
+
+    generation = _strict_object(
+        value,
+        "generation",
+        {"provider", "model", "attempted", "used", "fallbackReason", "usage"},
+    )
+    provider = generation["provider"]
+    model = generation["model"]
+    attempted = generation["attempted"]
+    used = generation["used"]
+    fallback_reason = generation["fallbackReason"]
+    usage = generation["usage"]
+    if (
+        not isinstance(provider, str)
+        or provider not in SUPPORTED_GENERATION_PROVIDERS
+        or type(attempted) is not bool
+        or type(used) is not bool
+        or not (model is None or isinstance(model, str))
+        or not (fallback_reason is None or fallback_reason in SUPPORTED_FALLBACK_REASONS)
+    ):
+        raise AgentProtocolError("generation has an invalid schema")
+    if model is not None and (not isinstance(model, str) or len(model) > 160):
+        raise AgentProtocolError("generation.model is invalid")
+    if used and (provider != "deepseek" or not model):
+        raise AgentProtocolError("generation.used requires a deepseek provider and model")
+    if not used and usage is not None:
+        raise AgentProtocolError("generation.usage is only allowed when a model was used")
+    if usage is None:
+        return {
+            "provider": provider,
+            "model": model,
+            "attempted": attempted,
+            "used": used,
+            "fallbackReason": fallback_reason,
+            "usage": None,
+        }
+    usage_fields = _strict_object(usage, "generation.usage", {"promptTokens", "completionTokens", "totalTokens"})
+    sanitized_usage: dict[str, int] = {}
+    for field in ("promptTokens", "completionTokens", "totalTokens"):
+        number = usage_fields[field]
+        if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number < 10_000_000:
+            raise AgentProtocolError(f"generation.usage.{field} is invalid")
+        sanitized_usage[field] = number
+    return {
+        "provider": provider,
+        "model": model,
+        "attempted": attempted,
+        "used": used,
+        "fallbackReason": fallback_reason,
+        "usage": sanitized_usage,
+    }
 
 
 def _validate_citations(value: object, context: str = "citations") -> list[dict[str, object]]:
@@ -297,9 +369,10 @@ class AgentClient:
                 "deepseekConfigured",
                 "detail",
             },
+            {"deepseekKeyPresent", "deepseekModel"},
         )
         if (
-            document["schemaVersion"] != "cet-agent-health/1"
+            document["schemaVersion"] not in SUPPORTED_HEALTH_SCHEMAS
             or document["service"] != "cet-agent-runtime"
             or not isinstance(document["status"], str)
             or document["status"] not in {"ok", "not_ready"}
@@ -311,6 +384,15 @@ class AgentClient:
             or bool(document["ready"]) != (document["status"] == "ok")
         ):
             raise AgentProtocolError("Agent health response has inconsistent readiness fields")
+        deepseek_model: str | None = None
+        if "deepseekModel" in document:
+            if document["deepseekModel"] is not None:
+                deepseek_model = _text(document["deepseekModel"], "deepseekModel", 160)
+        key_present = False
+        if "deepseekKeyPresent" in document:
+            if type(document["deepseekKeyPresent"]) is not bool:
+                raise AgentProtocolError("deepseekKeyPresent must be a boolean")
+            key_present = bool(document["deepseekKeyPresent"])
         return {
             "schemaVersion": document["schemaVersion"],
             "service": document["service"],
@@ -321,6 +403,8 @@ class AgentClient:
             "langgraphImportReady": document["langgraphImportReady"],
             "checkpointReady": document["checkpointReady"],
             "deepseekConfigured": document["deepseekConfigured"],
+            "deepseekKeyPresent": key_present,
+            "deepseekModel": deepseek_model,
             "detail": _text(document["detail"], "detail", 500, allow_empty=True),
         }
 
@@ -328,23 +412,39 @@ class AgentClient:
         expected_fields = {
             "examId", "questionId", "reviewRevision", "message", "userAnswer", "history", "context"
         }
-        if set(payload) != expected_fields:
+        optional_fields = {"requestId"}
+        if not set(payload) <= (expected_fields | optional_fields) or not expected_fields <= set(payload):
             raise AgentClientError("Agent tutor request has an invalid schema")
+        request_id = ""
+        if "requestId" in payload:
+            raw_request_id = payload["requestId"]
+            if (
+                not isinstance(raw_request_id, str)
+                or not raw_request_id.strip()
+                or len(raw_request_id.strip()) > 128
+            ):
+                raise AgentClientError("Agent tutor requestId is invalid")
+            request_id = raw_request_id.strip()
         exam_id = str(payload["examId"])
         question_id = str(payload["questionId"])
         revision = payload["reviewRevision"]
         if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
             raise AgentClientError("Agent tutor reviewRevision is invalid")
+        response_fields = {
+            "schemaVersion", "runId", "threadId", "status", "examId", "questionId",
+            "reviewRevision", "reply", "intent", "tools", "citations", "grounding", "trace",
+        }
         document = _strict_object(
             self._request("/v1/tutor", method="POST", payload=payload),
             "Agent tutor response",
-            {
-                "schemaVersion", "runId", "threadId", "status", "examId", "questionId",
-                "reviewRevision", "reply", "intent", "tools", "citations", "grounding", "trace",
-            },
+            response_fields,
+            {"generation", "requestId"},
         )
+        sent_request_id = request_id
+        if sent_request_id and document.get("requestId") != sent_request_id:
+            raise AgentProtocolError("Agent tutor response does not echo the request id")
         if (
-            document["schemaVersion"] != "cet-agent-tutor/1"
+            document["schemaVersion"] not in SUPPORTED_TUTOR_SCHEMAS
             or document["examId"] != exam_id
             or document["questionId"] != question_id
             or document["reviewRevision"] != revision
@@ -388,7 +488,7 @@ class AgentClient:
         retrieval_order = _string_list(grounding["retrievalOrder"], "grounding.retrievalOrder", 8)
         if retrieval_order != ["question_id_exact", "deterministic_vector_supplement"]:
             raise AgentProtocolError("grounding.retrievalOrder is invalid")
-        return {
+        result: dict[str, object] = {
             "schemaVersion": document["schemaVersion"],
             "runId": run_id,
             "threadId": thread_id,
@@ -414,6 +514,11 @@ class AgentClient:
             },
             "trace": _validate_trace(document["trace"]),
         }
+        if sent_request_id:
+            result["requestId"] = sent_request_id
+        if "generation" in document:
+            result["generation"] = _validate_generation(document["generation"])
+        return result
 
     def suggest_review(self, payload: Mapping[str, object]) -> dict[str, object]:
         if set(payload) != {"examId", "reviewRevision", "issue", "context"}:

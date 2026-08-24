@@ -370,7 +370,7 @@ class AgentHTTPTests(unittest.TestCase):
         document = response.document()
 
         self.assertEqual(response.response_status, 200)
-        self.assertEqual(document["schemaVersion"], "cet-agent-health/1")
+        self.assertEqual(document["schemaVersion"], agent_app.HEALTH_SCHEMA)
         self.assertTrue(document["ready"])
         self.assertTrue(document["checkpointReady"])
 

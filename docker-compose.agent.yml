@@ -14,11 +14,13 @@ services:
     ports:
       - "127.0.0.1:8770:8770"
     environment:
-      CET_AGENT_TOKEN: "${CET_AGENT_TOKEN-local-only-change-me}"
+      # Failing fast on a missing token keeps the loopback-only sidecar from
+# running without its only authentication factor.
+      CET_AGENT_TOKEN: "${CET_AGENT_TOKEN:?set CET_AGENT_TOKEN to a long random value}"
       CET_AGENT_CHECKPOINT_PATH: /data/agent-checkpoints.sqlite3
       CET_AGENT_CHECKPOINT_MAX_THREADS: "${CET_AGENT_CHECKPOINT_MAX_THREADS-50}"
       DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY-PASTE_YOUR_DEEPSEEK_API_KEY_HERE}"
-      CET_AGENT_DEEPSEEK_MODEL: "${CET_AGENT_DEEPSEEK_MODEL-deepseek-chat}"
+      CET_AGENT_DEEPSEEK_MODEL: "${CET_AGENT_DEEPSEEK_MODEL-deepseek-v4-flash}"
       CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS: "${CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS-25}"
     tmpfs:
       - /tmp:size=32m,mode=1777

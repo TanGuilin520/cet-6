@@ -55,7 +55,7 @@ Supported environment variables:
 | `CET_AGENT_CHECKPOINT_MAX_THREADS` | `50` | Retain only the newest graph runs, including failed runs (1–10000) |
 | `DEEPSEEK_API_KEY` | empty | Optional grounded reply drafting |
 | `CET_AGENT_DEEPSEEK_URL` | DeepSeek HTTPS chat-completions endpoint | Model endpoint |
-| `CET_AGENT_DEEPSEEK_MODEL` | `deepseek-chat` | Model name |
+| `CET_AGENT_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Model name; `deepseek-v4-pro` optional. Retired names map automatically (`deepseek-chat`→`deepseek-v4-flash`, `deepseek-reasoner`→`deepseek-v4-pro`) |
 | `CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS` | `25` | Model timeout, bounded to 1–120 seconds |
 
 Without `DEEPSEEK_API_KEY`, both graphs still run. Tutor replies fall back to a
@@ -101,17 +101,23 @@ check `ready`, not only the HTTP status:
 
 ```json
 {
-  "schemaVersion": "cet-agent-health/1",
+  "schemaVersion": "cet-agent-health/2",
   "service": "cet-agent-runtime",
   "status": "ok",
   "ready": true,
   "engine": "langgraph",
-  "pythonVersion": "3.11.9",
+  "pythonVersion": "3.11.16",
   "langgraphImportReady": true,
   "checkpointReady": true,
+  "deepseekKeyPresent": false,
   "deepseekConfigured": false,
+  "deepseekModel": "deepseek-v4-flash",
   "detail": "LangGraph and SQLite checkpoint are ready"
 }
+
+`deepseekConfigured` is true only when a real key exists **and** the URL/model
+configuration is valid; a key with an invalid model reads as configured=false.
+No health path ever calls DeepSeek, so readiness checks stay free.
 ```
 
 If Python, LangGraph, configuration, or the SQLite checkpoint is unavailable,
@@ -166,13 +172,14 @@ grounding fields:
 
 ```json
 {
-  "schemaVersion": "cet-agent-tutor/1",
+  "schemaVersion": "cet-agent-tutor/2",
   "runId": "b8e0...",
   "threadId": "b8e0...",
   "status": "completed",
   "examId": "exam-20250821-012345abcdef",
   "questionId": "q26",
   "reviewRevision": 3,
+  "requestId": "reader-7",
   "reply": "上传的答案资料记录为 C。...",
   "intent": "option_explanation",
   "tools": [{"name": "get_current_question", "status": "completed"}],
@@ -187,11 +194,32 @@ grounding fields:
     "disclaimer": "",
     "retrievalOrder": ["question_id_exact", "deterministic_vector_supplement"]
   },
+  "generation": {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "attempted": true,
+    "used": true,
+    "fallbackReason": null,
+    "usage": {"promptTokens": 123, "completionTokens": 80, "totalTokens": 203}
+  },
   "trace": {
     "nodes": ["route_intent", "read_context_tools", "retrieve_grounded_evidence", "draft_grounded_reply", "grounding_guard", "finalize_tutor"],
     "durationMs": 8
   }
 }
+```
+
+`generation` is versioned metadata about the drafting step: `used=true` means
+the reply came from DeepSeek; otherwise the deterministic fallback ran and
+`fallbackReason` carries a fixed enum (`not_configured`, `invalid_configuration`,
+`blocked_mutation`, `upstream_timeout`, `upstream_auth_error`,
+`upstream_rate_limited`, `upstream_server_error`, `invalid_response`). Usage
+counters come straight from the provider response. Upstream error bodies and
+credentials never appear anywhere in the document. Consumers must accept the
+legacy `cet-agent-tutor/1` shape without `generation` during migration.
+
+A tutor request may carry an optional bounded `requestId`; the response echoes
+it so Reader → main server → sidecar → trace can be correlated.
 ```
 
 ## Review-suggestion contract

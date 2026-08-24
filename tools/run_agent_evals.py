@@ -101,7 +101,7 @@ def evaluate_response(case: dict[str, Any], document: Any) -> list[str]:
         failures.append("required graph nodes were not observed")
 
     if case["endpoint"] == "/v1/tutor":
-        if document.get("schemaVersion") != "cet-agent-tutor/1":
+        if document.get("schemaVersion") not in {"cet-agent-tutor/1", "cet-agent-tutor/2"}:
             failures.append("unexpected tutor schemaVersion")
         if document.get("questionId") != case["request"].get("questionId"):
             failures.append("questionId was not preserved")

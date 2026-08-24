@@ -133,6 +133,34 @@
     return (Array.isArray(value) ? value : []).map(normalizeAiCitation).filter(Boolean).slice(0, 6);
   }
 
+  function normalizeAiGeneration(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const FALLBACK_REASONS = new Set([
+      'not_configured', 'invalid_configuration', 'blocked_mutation',
+      'upstream_timeout', 'upstream_auth_error', 'upstream_rate_limited',
+      'upstream_server_error', 'invalid_response', 'agent_transport_error',
+    ]);
+    const model = String(value.model ?? '').trim().slice(0, 160);
+    const fallbackReason = String(value.fallbackReason ?? '').trim();
+    const usage = value.usage && typeof value.usage === 'object'
+      ? ['promptTokens', 'completionTokens', 'totalTokens'].reduce((acc, key) => {
+        const number = Number(value.usage[key]);
+        if (Number.isInteger(number) && number >= 0) acc[key] = number;
+        return acc;
+      }, {})
+      : null;
+    const generation = {
+      provider: value.provider === 'deepseek' ? 'deepseek' : 'deterministic',
+      model: model || null,
+      attempted: value.attempted === true,
+      used: value.used === true && value.provider === 'deepseek',
+      fallbackReason: FALLBACK_REASONS.has(fallbackReason) ? fallbackReason : null,
+      usage: usage && Object.keys(usage).length ? usage : null,
+    };
+    if (!generation.used) generation.usage = null;
+    return generation;
+  }
+
   function normalizeAiAgent(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
     const rawTools = Array.isArray(value.tools) ? value.tools : [];
@@ -176,8 +204,10 @@
         if (clean.role === 'assistant') {
           const citations = normalizeAiCitations(message?.citations);
           const agent = normalizeAiAgent(message?.agent);
+          const generation = normalizeAiGeneration(message?.generation);
           if (citations.length) clean.citations = citations;
           if (agent) clean.agent = agent;
+          if (generation) clean.generation = generation;
         }
         return clean;
       }).filter((message) => message.content) : [];
@@ -1381,14 +1411,36 @@
       details.append(list);
       container.append(details);
     }
+    const generation = normalizeAiGeneration(message?.generation);
+    if (generation && !message?.agent) {
+      const details = document.createElement('details');
+      details.append(makeElement('summary', '', '模型运行'));
+      const list = document.createElement('ul');
+      list.append(makeElement('li', '', `Provider：${generation.provider}`));
+      list.append(makeElement('li', '', generation.used ? '已使用 DeepSeek 模型' : `未使用模型（${generation.fallbackReason || 'deterministic'}）`));
+      if (generation.model) list.append(makeElement('li', '', `Model：${generation.model}`));
+      if (generation.usage) {
+        list.append(makeElement('li', '', `Tokens：输入 ${generation.usage.promptTokens ?? '-'} / 输出 ${generation.usage.completionTokens ?? '-'} / 共 ${generation.usage.totalTokens ?? '-'}`));
+      }
+      details.append(list);
+      container.append(details);
+    }
     const agent = normalizeAiAgent(message?.agent);
     if (!agent) return;
     const details = document.createElement('details');
     const summaryParts = ['Agent 运行'];
     if (agent.intent) summaryParts.push(agent.intent);
     if (agent.trace.durationMs !== null) summaryParts.push(`${agent.trace.durationMs} ms`);
+    if (generation?.used) summaryParts.push(generation.model || 'model');
     details.append(makeElement('summary', '', summaryParts.join(' · ')));
     const list = document.createElement('ul');
+    if (generation) {
+      list.append(makeElement('li', '', `Provider：${generation.provider}${generation.model ? ` · Model：${generation.model}` : ''}`));
+      list.append(makeElement('li', '', generation.used ? '本次回答由 DeepSeek 生成' : `使用确定性回退（${generation.fallbackReason || 'not_configured'}）`));
+      if (generation.usage) {
+        list.append(makeElement('li', '', `Tokens：输入 ${generation.usage.promptTokens ?? '-'} / 输出 ${generation.usage.completionTokens ?? '-'} / 共 ${generation.usage.totalTokens ?? '-'}`));
+      }
+    }
     if (agent.runId) list.append(makeElement('li', '', `Run ID：${agent.runId}`));
     agent.tools.forEach((tool) => {
       const status = tool.status ? `（${tool.status}）` : '';
@@ -1509,7 +1561,7 @@
     renderAiQuestionMessages(question.id, true);
     save();
     try {
-      const body = { questionId: question.id, message: cleanMessage, history: requestHistory };
+      const body = { questionId: question.id, message: cleanMessage, history: requestHistory, requestId: `reader-${requestId}` };
       if (Number.isInteger(requestRevision) && requestRevision >= 0) {
         body.reviewRevision = requestRevision;
       }
@@ -1542,8 +1594,10 @@
       const assistantMessage = { role: 'assistant', content: reply.slice(0, 2500), requestId };
       const citations = normalizeAiCitations(data?.citations ?? data?.grounding?.citations);
       const agent = normalizeAiAgent(data?.agent);
+      const generation = normalizeAiGeneration(data?.generation);
       if (citations.length) assistantMessage.citations = citations;
       if (agent) assistantMessage.agent = agent;
+      if (generation) assistantMessage.generation = generation;
       state.aiHistory[questionId] = [...(state.aiHistory[questionId] || []), assistantMessage].slice(-12);
     } catch (error) {
       const failureMessage = error?.revisionChanged
