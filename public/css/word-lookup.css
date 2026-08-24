@@ -1,0 +1,163 @@
+/* Shared word-lookup card styles for reader.html and practice.html. */
+
+.wl-card {
+  position: fixed;
+  z-index: 120;
+  top: 0;
+  left: 0;
+  width: min(320px, calc(100vw - 24px));
+  max-height: min(72dvh, 480px);
+  display: none;
+  flex-direction: column;
+  padding: 16px;
+  border: 1px solid #d7e3e8;
+  border-radius: 13px;
+  background: #fff;
+  box-shadow: 0 18px 42px rgba(23, 62, 82, .2);
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+.wl-card.is-open { display: flex; }
+.wl-card.is-open[style] { max-height: min(72dvh, 480px); }
+
+.wl-close {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  color: #81929b;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  font-size: 19px;
+  line-height: 1;
+}
+.wl-close:hover { color: #325f78; background: #edf4f6; }
+
+.wl-kicker { margin: 0 30px 5px 0; color: #2d89b4; font-size: 8px; font-weight: 800; letter-spacing: .14em; }
+.wl-word {
+  margin: 0;
+  overflow: hidden;
+  color: #29495d;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: 22px;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wl-status { margin: 4px 0 0; color: #8b9ba3; font-size: 10px; line-height: 1.4; }
+
+.wl-phonetics { display: grid; gap: 6px; margin-top: 11px; }
+.wl-accent-row { display: flex; align-items: center; gap: 8px; }
+.wl-accent-label { flex: 0 0 auto; color: #6c8896; font-size: 10px; font-weight: 700; }
+.wl-ipa {
+  min-width: 0;
+  overflow: hidden;
+  color: #56707e;
+  font-family: Georgia, serif;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wl-play, .wl-synth-play {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  color: #2b83ac;
+  border: 1px solid #cfe5ec;
+  border-radius: 7px;
+  background: #eff8fa;
+  font-size: 10px;
+  font-weight: 700;
+}
+.wl-play:hover, .wl-synth-play:hover { color: #fff; background: #3f91b6; }
+.wl-play svg, .wl-synth-play svg { width: 13px; fill: currentColor; stroke: currentColor; stroke-width: 1.6; }
+
+.wl-synth-badge {
+  margin: 9px 0 0;
+  padding: 7px 9px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #8a6a1f;
+  border: 1px dashed #e3cf96;
+  border-radius: 8px;
+  background: #fdf6e3;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.wl-translation-block {
+  margin-top: 11px;
+  padding: 8px 10px;
+  border-left: 3px solid #54a5c6;
+  border-radius: 0 6px 6px 0;
+  background: #f1f7f9;
+}
+.wl-translation-block b { color: #587585; font-size: 9px; letter-spacing: .06em; }
+.wl-translation { margin: 3px 0 0; color: #496474; font-size: 12px; font-weight: 700; line-height: 1.55; }
+
+.wl-meanings {
+  margin-top: 11px;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.wl-meaning + .wl-meaning { margin-top: 9px; }
+.wl-pos {
+  display: inline-block;
+  padding: 1px 7px;
+  color: #3585ad;
+  border-radius: 5px;
+  background: #e6f2f6;
+  font-size: 9px;
+  font-weight: 800;
+  font-style: italic;
+}
+.wl-definitions { margin: 5px 0 0; padding-left: 16px; color: #546e7d; }
+.wl-definitions li { margin: 3px 0; font-family: Georgia, serif; font-size: 12px; line-height: 1.5; }
+.wl-example { margin: 4px 0 0; color: #7d94a0; font-family: Georgia, serif; font-size: 11px; line-height: 1.5; }
+
+.wl-source {
+  margin-top: 12px;
+  padding-top: 9px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  border-top: 1px solid #ebf1f2;
+  color: #93a4ac;
+  font-size: 9px;
+  line-height: 1.5;
+}
+.wl-source a { color: #4a93b4; text-decoration: underline; }
+.wl-source a:hover { color: #1e729e; }
+
+.wl-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.wl-actions:empty { display: none; }
+
+/* Host pages may highlight the clicked word with this shared class. */
+.wl-target-active {
+  background: rgba(54, 151, 194, .16);
+  box-shadow: inset 0 -1px rgba(38, 125, 166, .46);
+}
+
+@media (max-width: 680px) {
+  .wl-card {
+    top: auto !important;
+    right: 0;
+    bottom: 0;
+    left: 0 !important;
+    width: 100%;
+    max-height: min(70dvh, 430px);
+    border-radius: 15px 15px 0 0;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wl-card { transition: none; }
+}

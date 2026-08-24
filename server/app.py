@@ -31,6 +31,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
+from .dictionary import DICTIONARY_SERVICE, DictionaryError
 from .platform import PLATFORM_API
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -122,7 +123,15 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:
         # Keep the development console focused on startup and genuine errors.
-        if self.path.startswith(("/api/tts", "/api/deepseek", "/api/chat", "/api/exams", "/api/papers")):
+        if self.path.startswith((
+            "/api/tts",
+            "/api/deepseek",
+            "/api/chat",
+            "/api/exams",
+            "/api/papers",
+            "/api/dictionary",
+            "/api/pronunciation",
+        )):
             return
         super().log_message(format, *args)
 
@@ -133,6 +142,12 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/tts":
             self._serve_tts(parse_qs(parsed.query), include_body=True)
             return
+        if parsed.path == "/api/dictionary":
+            self._serve_dictionary(parse_qs(parsed.query), include_body=True)
+            return
+        if parsed.path == "/api/pronunciation":
+            self._serve_pronunciation(parse_qs(parsed.query), include_body=True)
+            return
         super().do_GET()
 
     def do_HEAD(self) -> None:  # noqa: N802 - inherited stdlib API
@@ -141,6 +156,12 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path == "/api/tts":
             self._serve_tts(parse_qs(parsed.query), include_body=False)
+            return
+        if parsed.path == "/api/dictionary":
+            self._serve_dictionary(parse_qs(parsed.query), include_body=False)
+            return
+        if parsed.path == "/api/pronunciation":
+            self._serve_pronunciation(parse_qs(parsed.query), include_body=False)
             return
         super().do_HEAD()
 
@@ -440,6 +461,48 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
         payload = output.read_bytes()
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", "audio/wav")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if include_body:
+            self.wfile.write(payload)
+
+    @staticmethod
+    def _single_query_value(query: dict[str, list[str]], name: str) -> str:
+        values = query.get(name) or []
+        return values[0].strip() if len(values) == 1 else ""
+
+    def _serve_dictionary(self, query: dict[str, list[str]], include_body: bool) -> None:
+        raw_word = self._single_query_value(query, "word")
+        try:
+            payload = DICTIONARY_SERVICE.lookup(raw_word)
+        except DictionaryError as error:
+            self._json_error(error.status, error.message)
+            return
+        except Exception:  # never let one lookup take the whole server down
+            self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "dictionary lookup failed unexpectedly")
+            return
+        self._json_response(HTTPStatus.OK, payload, include_body=include_body)
+
+    def _serve_pronunciation(self, query: dict[str, list[str]], include_body: bool) -> None:
+        raw_word = self._single_query_value(query, "word")
+        raw_accent = self._single_query_value(query, "accent")
+        try:
+            audio_path, mime = DICTIONARY_SERVICE.pronunciation(raw_word, raw_accent)
+        except DictionaryError as error:
+            self._json_error(error.status, error.message)
+            return
+        except Exception:
+            self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "pronunciation lookup failed unexpectedly")
+            return
+        try:
+            payload = audio_path.read_bytes()
+        except OSError:
+            self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "cached pronunciation is unreadable")
+            return
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.send_header("X-Content-Type-Options", "nosniff")

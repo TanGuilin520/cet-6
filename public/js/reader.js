@@ -48,11 +48,6 @@
   const tagLabelInput = $('#tag-label');
   const tagNoteInput = $('#tag-note');
   const tagDeleteButton = $('#delete-tag');
-  const wordPopover = $('#word-popover');
-  const lookupWord = $('#lookup-word');
-  const lookupStatus = $('#lookup-status');
-  const lookupTranslation = $('#lookup-translation');
-  const lookupPronounce = $('#lookup-pronounce');
   const questionWorkspace = $('#question-workspace');
   const questionNavigator = $('#question-navigator');
   const questionDetail = $('#question-detail');
@@ -60,9 +55,7 @@
   const submitExamButton = $('#submit-exam');
   const aiQuestionPanel = $('#ai-question-panel');
   const aiQuestionMessages = $('#ai-question-messages');
-  const translationCache = new Map();
-  const localAudioWords = new Set(['contribute', 'flexible', 'visible']);
-  const wordAudio = typeof Audio === 'function' ? new Audio() : null;
+  const wordLookup = typeof WordLookup !== 'undefined' ? WordLookup.create() : null;
 
   const stored = (() => {
     try {
@@ -262,9 +255,6 @@
   let toastTimer = 0;
   let saveTimer = 0;
   let scrollFrame = 0;
-  let activeLookup = null;
-  let lookupRequest = 0;
-  let pronunciationRequest = 0;
   let questions = [];
   let answerKey = new Map();
   let questionReviewSummary = null;
@@ -506,112 +496,14 @@
     return match ? match[0].replace(/’/g, "'") : '';
   }
 
-  function decodeHtmlText(value) {
-    const decoder = document.createElement('textarea');
-    decoder.innerHTML = String(value || '');
-    return decoder.value.trim();
-  }
-
-  async function getTranslation(word) {
-    const key = cleanLookupWord(word).toLowerCase();
-    if (!key) throw new Error('invalid lookup word');
-    if (translationCache.has(key)) return translationCache.get(key);
-    const response = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(key)}&langpair=en%7Czh-CN`);
-    if (!response.ok) throw new Error(`translation request failed: ${response.status}`);
-    const data = await response.json();
-    const translation = decodeHtmlText(data?.responseData?.translatedText);
-    if (!translation) throw new Error('empty translation');
-    translationCache.set(key, translation);
-    return translation;
-  }
-
-  function speakWithBrowser(word) {
-    if (!word || !('speechSynthesis' in window)) return false;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(word);
-    utterance.lang = 'en-GB';
-    utterance.rate = .86;
-    utterance.pitch = 1;
-    window.speechSynthesis.speak(utterance);
-    return true;
-  }
-
-  function pronounce(word) {
-    const spokenWord = cleanLookupWord(word);
-    if (!spokenWord) return;
-    const request = ++pronunciationRequest;
-    let usedFallback = false;
-    const useBrowserFallback = () => {
-      if (request !== pronunciationRequest || usedFallback) return;
-      usedFallback = true;
-      if (!speakWithBrowser(spokenWord)) showToast('当前浏览器暂不支持单词朗读');
-    };
-    if (!wordAudio) {
-      useBrowserFallback();
-      return;
-    }
-    wordAudio.pause();
-    wordAudio.currentTime = 0;
-    wordAudio.onerror = useBrowserFallback;
-    const audioWord = spokenWord.toLowerCase();
-    const localFilename = audioWord.replace(/[^a-z]/g, '');
-    wordAudio.src = localAudioWords.has(localFilename) && localFilename === audioWord
-      ? `assets/audio/${localFilename}.wav`
-      : `/api/tts?word=${encodeURIComponent(audioWord)}`;
-    const playback = wordAudio.play();
-    if (playback && typeof playback.catch === 'function') playback.catch(useBrowserFallback);
-  }
-
-  function positionWordPopover(target) {
-    if (!target || !wordPopover) return;
-    if (matchMedia('(max-width: 680px)').matches) {
-      wordPopover.style.removeProperty('left');
-      wordPopover.style.removeProperty('top');
-      return;
-    }
-    const targetBox = target.getBoundingClientRect();
-    const width = wordPopover.offsetWidth;
-    const height = wordPopover.offsetHeight;
-    const left = clamp(targetBox.left + targetBox.width / 2 - width / 2, 12, Math.max(12, innerWidth - width - 12));
-    const preferredTop = targetBox.bottom + height + 10 > innerHeight ? targetBox.top - height - 10 : targetBox.bottom + 10;
-    Object.assign(wordPopover.style, {
-      left: `${left}px`,
-      top: `${clamp(preferredTop, 12, Math.max(12, innerHeight - height - 12))}px`,
-    });
-  }
-
   function closeWordPopover() {
-    lookupRequest += 1;
-    activeLookup?.target?.classList.remove('is-lookup-active');
-    activeLookup = null;
-    wordPopover?.classList.remove('is-visible');
-    wordPopover?.setAttribute('aria-hidden', 'true');
+    wordLookup?.close();
   }
 
   function openWordPopover(target, value) {
-    const word = cleanLookupWord(value);
-    if (!word || !wordPopover) return;
+    if (!wordLookup) return;
     closeTagEditor();
-    closeWordPopover();
-    const request = ++lookupRequest;
-    activeLookup = { target, word };
-    target.classList.add('is-lookup-active');
-    lookupWord.textContent = word;
-    lookupStatus.textContent = '正在查询中文释义…';
-    lookupTranslation.textContent = '';
-    wordPopover.classList.add('is-visible');
-    wordPopover.setAttribute('aria-hidden', 'false');
-    requestAnimationFrame(() => positionWordPopover(target));
-    pronounce(word);
-    getTranslation(word).then((translation) => {
-      if (request !== lookupRequest || activeLookup?.target !== target || activeLookup.word !== word) return;
-      lookupStatus.textContent = '中文释义';
-      lookupTranslation.textContent = translation;
-    }).catch(() => {
-      if (request !== lookupRequest || activeLookup?.target !== target || activeLookup.word !== word) return;
-      lookupStatus.textContent = '在线释义暂不可用';
-      lookupTranslation.textContent = '仍可点击喇叭使用英文朗读。';
-    });
+    wordLookup.open(target, value);
   }
 
   function save() {
@@ -2419,26 +2311,15 @@
   $('#save-tag')?.addEventListener('click', saveTag);
   $('#cancel-tag')?.addEventListener('click', closeTagEditor);
   tagDeleteButton?.addEventListener('click', deleteTag);
-  $('#word-popover-close')?.addEventListener('click', closeWordPopover);
   $('#copy-selection-text')?.addEventListener('click', copyPendingSelection);
   $('#close-selection-copy')?.addEventListener('click', closeSelectionCopyPanel);
   $('[data-close-selection-copy]')?.addEventListener('click', closeSelectionCopyPanel);
-  lookupPronounce?.addEventListener('click', () => {
-    if (activeLookup?.word) pronounce(activeLookup.word);
-  });
-  document.addEventListener('click', (event) => {
-    if (!wordPopover?.classList.contains('is-visible')) return;
-    if (event.target.closest('#word-popover, .pdf-word')) return;
-    closeWordPopover();
-  });
   viewport?.addEventListener('scroll', () => {
     updateCurrentPageFromScroll();
-    if (activeLookup?.target?.isConnected) positionWordPopover(activeLookup.target);
   }, { passive: true });
   addEventListener('resize', () => {
     applyScale();
     if (activeTag) positionTagEditor(tagRectInViewport(activeTag));
-    if (activeLookup?.target?.isConnected) positionWordPopover(activeLookup.target);
   });
   document.addEventListener('keydown', (event) => {
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.target.closest('input, textarea')) {
@@ -2447,7 +2328,7 @@
     if (event.key === 'Escape') {
       if (tagEditor?.classList.contains('is-visible')) closeTagEditor();
       if ($('#selection-copy-panel')?.classList.contains('is-visible')) closeSelectionCopyPanel();
-      if (wordPopover?.classList.contains('is-visible')) closeWordPopover();
+      closeWordPopover();
       if (aiQuestionPanel?.classList.contains('is-visible')) closeAiQuestionPanel();
       if (viewer.classList.contains('is-question-panel-open')) closeQuestionPanel();
     }

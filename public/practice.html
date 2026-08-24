@@ -10,6 +10,7 @@
     <meta name="theme-color" content="#173c5b" />
     <title>Reading Lab · 阅读训练</title>
     <link rel="stylesheet" href="css/practice.css" />
+    <link rel="stylesheet" href="css/word-lookup.css?v=20260824-dict-1" />
   </head>
   <body>
     <div class="reader-page" id="reader-page">
@@ -345,17 +346,8 @@
       <div class="annotation-editor-actions"><button type="button" class="text-tag-delete" id="annotation-delete" hidden>删除标签</button><span></span><button type="button" class="secondary-button" id="annotation-cancel">取消</button><button type="button" class="primary-button" id="annotation-save">保存标签</button></div>
     </section>
 
-    <section class="word-popover" id="word-popover" role="dialog" aria-modal="false" aria-labelledby="popover-word" aria-hidden="true">
-      <button class="popover-close" id="word-close" type="button" aria-label="关闭取词浮层">×</button>
-      <p class="popover-label">WORD LOOKUP</p>
-      <div class="popover-wordline"><h2 id="popover-word">flexible</h2><button class="popover-audio" id="word-pronounce" type="button" aria-label="播放单词读音"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10v4h4l5 4V6l-5 4zM16 9a4 4 0 0 1 0 6M18.5 6.5a7.5 7.5 0 0 1 0 11" /></svg></button></div>
-      <p class="word-phonetic" id="popover-phonetic">/ˈfleksəb(ə)l/</p>
-      <p class="word-definition" id="popover-definition">able to change or be changed easily</p>
-      <p class="word-translation" id="popover-translation">灵活的；可调整的</p>
-      <div class="popover-actions"><button class="text-action" id="word-add-note" type="button">记入笔记</button><button class="word-save" id="word-save" type="button" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12a2 2 0 0 1 2 2v15a1 1 0 0 1-1.5.86L12 17l-6.5 3.86A1 1 0 0 1 4 20V5a2 2 0 0 1 2-2Z" /></svg>生词本</button></div>
-    </section>
-
     <div class="reader-toast" id="reader-toast" role="status" aria-live="polite"></div>
+    <script src="js/word-lookup.js?v=20260824-dict-1"></script>
     <script src="js/practice.js"></script>
   </body>
 </html>

@@ -413,10 +413,78 @@
     save(); showToast(`播放速度已设为 ${state.audioRate}×`);
   });
 
-  // Word lookup and pronunciation --------------------------------------
-  const popover = $('#word-popover');
-  const translationCache = new Map();
-  const localAudioWords = new Set(['flexible', 'visible', 'contribute']);
+  // Word lookup and pronunciation (shared module) -----------------------
+  const wordLookup = typeof WordLookup !== 'undefined' ? WordLookup.create({
+    onOpen: ({ word }) => {
+      activeWord = { word, translation: '', phonetic: '' };
+      syncWordSaveState();
+    },
+    onClose: () => { activeWord = null; },
+  }) : null;
+
+  function syncWordSaveState() {
+    if (!wordLookup || !activeWord) return;
+    const saved = state.words.some((item) => item.word.toLowerCase() === activeWord.word.toLowerCase());
+    $('[data-wl-save]', wordLookup.element)?.setAttribute('aria-pressed', String(saved));
+  }
+
+  function toggleSavedWord(button) {
+    if (!activeWord) return;
+    const card = wordLookup?.element;
+    const translation = $('.wl-translation', card)?.textContent.trim();
+    const phonetic = $('.wl-ipa', card)?.textContent.trim() || '';
+    const index = state.words.findIndex((item) => item.word.toLowerCase() === activeWord.word.toLowerCase());
+    if (index >= 0) {
+      state.words.splice(index, 1);
+      button.setAttribute('aria-pressed', 'false');
+      showToast('已从生词本移除');
+    } else {
+      state.words.unshift({
+        word: activeWord.word,
+        translation: translation && !translation.startsWith('正在') && !translation.includes('暂时不可用') ? translation : '待补充释义',
+        phonetic,
+        savedAt: Date.now(),
+      });
+      button.setAttribute('aria-pressed', 'true');
+      showToast('已加入生词本，跨试卷保留');
+    }
+    updateWordBank();
+    save();
+  }
+
+  function openWordPopover(target) {
+    if (!wordLookup) return;
+    const word = target.dataset.word || target.textContent.trim();
+    wordLookup.open(target, word);
+  }
+
+  if (wordLookup) {
+    const noteButton = document.createElement('button');
+    noteButton.type = 'button';
+    noteButton.className = 'text-action';
+    noteButton.textContent = '记入笔记';
+    noteButton.setAttribute('aria-label', '把当前单词记入笔记');
+    noteButton.addEventListener('click', () => {
+      const card = wordLookup.element;
+      const word = activeWord?.word || wordLookup.currentWord;
+      if (!word || !noteEditor) return;
+      const translation = $('.wl-translation', card)?.textContent.trim() || '';
+      noteEditor.value = `${word} — ${translation}`.replace(/\s+$/, '');
+      updateCharCount();
+      wordLookup.close();
+      openDrawer('note-drawer');
+      setTimeout(() => noteEditor.focus(), 120);
+    });
+    const saveButton = document.createElement('button');
+    saveButton.type = 'button';
+    saveButton.className = 'word-save';
+    saveButton.dataset.wlSave = '';
+    saveButton.setAttribute('aria-pressed', 'false');
+    saveButton.setAttribute('aria-label', '加入或移出生词本');
+    saveButton.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12a2 2 0 0 1 2 2v15a1 1 0 0 1-1.5.86L12 17l-6.5 3.86A1 1 0 0 1 4 20V5a2 2 0 0 1 2-2Z" /></svg>生词本';
+    saveButton.addEventListener('click', () => toggleSavedWord(saveButton));
+    wordLookup.actionsSlot.append(noteButton, saveButton);
+  }
 
   function makePassageWordsClickable() {
     const passage = $('.passage');
@@ -927,19 +995,6 @@
   addEventListener('resize', () => { scheduleMarkupRender(); positionAnnotationEditor(); });
   addEventListener('scroll', positionAnnotationEditor, true);
 
-  async function getTranslation(word) {
-    const cleanWord = String(word || '').toLowerCase().replace(/[^a-z'-]/g, '');
-    if (!cleanWord) return '';
-    if (translationCache.has(cleanWord)) return translationCache.get(cleanWord);
-    const response = await fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(cleanWord)}&langpair=en%7Czh-CN`);
-    if (!response.ok) throw new Error('translation request failed');
-    const data = await response.json();
-    const translation = String(data?.responseData?.translatedText || '').trim();
-    if (!translation) throw new Error('empty translation');
-    translationCache.set(cleanWord, translation);
-    return translation;
-  }
-
   function renderWordbookList(list, target) {
     if (!target) return;
     if (!list.length) {
@@ -971,86 +1026,11 @@
     state.words = state.words.filter((item) => item.word.toLowerCase() !== String(word).toLowerCase());
     if (state.words.length !== before) {
       updateWordBank(); save(); showToast(`已从生词本移除 ${word}`);
-      if (activeWord?.word.toLowerCase() === String(word).toLowerCase()) $('#word-save')?.setAttribute('aria-pressed', 'false');
+      if (activeWord?.word.toLowerCase() === String(word).toLowerCase()) wordLookup?.actionsSlot.querySelector('[data-wl-save]')?.setAttribute('aria-pressed', 'false');
     }
   }
   function closeWordPopover() {
-    popover?.classList.remove('is-visible');
-    popover?.setAttribute('aria-hidden', 'true');
-    activeWord = null;
-  }
-  const wordAudio = new Audio();
-  wordAudio.preload = 'auto';
-  wordAudio.volume = 1;
-  function speakWithBrowser(word) {
-    if (!word || !('speechSynthesis' in window)) return false;
-    window.speechSynthesis.cancel();
-    const utterance = new SpeechSynthesisUtterance(word);
-    utterance.lang = 'en-GB'; utterance.rate = 0.83; utterance.pitch = 1;
-    window.speechSynthesis.speak(utterance);
-    return true;
-  }
-  function pronounce(word) {
-    if (!word) return;
-    const filename = word.toLowerCase().replace(/[^a-z]/g, '');
-    wordAudio.pause();
-    wordAudio.currentTime = 0;
-    const source = localAudioWords.has(filename)
-      ? `assets/audio/${filename}.wav`
-      : `api/tts?word=${encodeURIComponent(filename)}`;
-    let usedBrowserFallback = false;
-    const useBrowserFallback = () => {
-      if (usedBrowserFallback) return;
-      usedBrowserFallback = true;
-      if (speakWithBrowser(word)) showToast(`正在朗读 ${word}`);
-      else showToast('当前浏览器不支持语音朗读');
-    };
-    wordAudio.addEventListener('error', useBrowserFallback, { once: true });
-    wordAudio.src = source;
-    wordAudio.play().then(() => {
-      showToast(`正在播放 ${word} 的英语发音`);
-    }).catch(useBrowserFallback);
-  }
-  function openWordPopover(target) {
-    if (!popover) return;
-    const word = target.dataset.word || target.textContent.trim();
-    activeWord = {
-      word,
-      phonetic: target.dataset.phonetic || '',
-      definition: target.dataset.definition || 'English word',
-      translation: target.dataset.translation || '',
-    };
-    $('#popover-word').textContent = activeWord.word;
-    $('#popover-phonetic').textContent = activeWord.phonetic || '查询发音中';
-    $('#popover-definition').textContent = activeWord.definition;
-    $('#popover-translation').textContent = activeWord.translation || '正在查询中文释义…';
-    const saved = state.words.some((item) => item.word.toLowerCase() === word.toLowerCase());
-    $('#word-save')?.setAttribute('aria-pressed', String(saved));
-    popover.classList.add('is-visible');
-    popover.setAttribute('aria-hidden', 'false');
-
-    if (!activeWord.translation) {
-      const requestedWord = activeWord.word;
-      getTranslation(requestedWord).then((translation) => {
-        if (!activeWord || activeWord.word !== requestedWord) return;
-        activeWord.translation = translation;
-        $('#popover-translation').textContent = translation;
-        $('#popover-phonetic').textContent = activeWord.phonetic || '点击喇叭播放发音';
-      }).catch(() => {
-        if (!activeWord || activeWord.word !== requestedWord) return;
-        $('#popover-translation').textContent = '本地词库暂未收录，请检查网络后重试';
-        $('#popover-phonetic').textContent = activeWord.phonetic || '点击喇叭播放发音';
-      });
-    }
-    const box = target.getBoundingClientRect();
-    const popoverWidth = popover.offsetWidth;
-    const popoverHeight = popover.offsetHeight;
-    const left = clamp(box.left + box.width / 2 - popoverWidth / 2, 12, Math.max(12, innerWidth - popoverWidth - 12));
-    const preferredTop = box.bottom + popoverHeight + 12 > innerHeight ? box.top - popoverHeight - 12 : box.bottom + 12;
-    const top = clamp(preferredTop, 12, Math.max(12, innerHeight - popoverHeight - 12));
-    Object.assign(popover.style, { left: `${left}px`, top: `${top}px` });
-    // Match the instant-feedback flow: clicking a word opens its card and starts pronunciation.
-    pronounce(activeWord.word);
+    wordLookup?.close();
   }
   document.addEventListener('click', (event) => {
     if (event.target.closest('[data-text-tag-id]')) return;
@@ -1063,31 +1043,11 @@
     }
     const removeButton = event.target.closest('[data-remove-word]');
     if (removeButton) { removeWord(removeButton.dataset.removeWord); return; }
-    if (!popover?.contains(event.target)) closeWordPopover();
     if (
       annotationEditor?.classList.contains('is-visible')
       && !annotationEditor.contains(event.target)
       && !event.target.closest('[data-mark-tool]')
     ) closeAnnotationEditor();
-  });
-  $('#word-close')?.addEventListener('click', closeWordPopover);
-  $('#word-pronounce')?.addEventListener('click', () => pronounce(activeWord?.word));
-  $('#word-save')?.addEventListener('click', (event) => {
-    if (!activeWord) return;
-    const index = state.words.findIndex((item) => item.word.toLowerCase() === activeWord.word.toLowerCase());
-    if (index >= 0) {
-      state.words.splice(index, 1); event.currentTarget.setAttribute('aria-pressed', 'false'); showToast('已从生词本移除');
-    } else {
-      state.words.unshift({ word: activeWord.word, translation: activeWord.translation || '待补充释义', phonetic: activeWord.phonetic || '', savedAt: Date.now() });
-      event.currentTarget.setAttribute('aria-pressed', 'true'); showToast('已加入生词本，跨试卷保留');
-    }
-    updateWordBank(); save();
-  });
-  $('#word-add-note')?.addEventListener('click', () => {
-    if (!activeWord || !noteEditor) return;
-    noteEditor.value = `${activeWord.word} — ${activeWord.translation || activeWord.definition}`;
-    updateCharCount(); closeWordPopover(); openDrawer('note-drawer');
-    setTimeout(() => noteEditor.focus(), 120);
   });
   $('#open-word-bank')?.addEventListener('click', () => { closeWordPopover(); updateWordBank(); openDrawer('wordbook-drawer'); });
   $('#clear-wordbook')?.addEventListener('click', () => {
@@ -1315,7 +1275,7 @@
     }
     if (event.key !== 'Escape') return;
     if (annotationEditor?.classList.contains('is-visible')) closeAnnotationEditor();
-    else if (popover?.classList.contains('is-visible')) closeWordPopover();
+    else if (wordLookup?.isOpen()) closeWordPopover();
     else if (activeDrawer) closeDrawer();
     else if (reader.classList.contains('index-open')) reader.classList.remove('index-open');
   });

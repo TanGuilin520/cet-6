@@ -8,6 +8,7 @@
     <title>完整试卷 · CET-4 Exam Viewer</title>
     <link rel="preload" href="assets/papers/2021-06-set-01/pages/page-1.jpg" as="image" type="image/jpeg" />
     <link rel="stylesheet" href="css/reader.css?v=20260824-unified-reader-2" />
+    <link rel="stylesheet" href="css/word-lookup.css?v=20260824-dict-1" />
   </head>
   <body>
     <div class="exam-viewer" id="exam-viewer" data-tool="select">
@@ -161,23 +162,6 @@
         <div class="editor-actions"><button class="delete-button" id="delete-tag" type="button" hidden>删除标签</button><span></span><button class="secondary-button" id="cancel-tag" type="button">取消</button><button class="primary-button" id="save-tag" type="button">保存标签</button></div>
       </section>
 
-      <section class="word-popover" id="word-popover" role="dialog" aria-labelledby="lookup-word" aria-hidden="true">
-        <button class="word-popover-close" id="word-popover-close" type="button" aria-label="关闭单词卡">×</button>
-        <p class="word-popover-kicker">WORD LOOKUP</p>
-        <div class="word-popover-heading">
-          <div>
-            <h2 id="lookup-word">单词</h2>
-            <p class="word-popover-status" id="lookup-status" role="status" aria-live="polite">正在查询中文释义…</p>
-          </div>
-          <button class="word-pronounce-button" id="lookup-pronounce" type="button" aria-label="朗读当前单词" title="朗读当前单词">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 10v4h3l4 4V6L8 10z" /><path d="M16 9a4 4 0 0 1 0 6m2.5-8.5a7.5 7.5 0 0 1 0 11" /></svg>
-            <span>朗读</span>
-          </button>
-        </div>
-        <p class="word-popover-translation" id="lookup-translation"></p>
-        <p class="word-popover-hint">单击词卡外关闭；拖选文字仍可记录标签。</p>
-      </section>
-
       <section class="selection-copy-panel" id="selection-copy-panel" role="dialog" aria-modal="false" aria-labelledby="selection-copy-title" aria-hidden="true">
         <button class="selection-copy-close" id="close-selection-copy" type="button" aria-label="关闭复制面板">×</button>
         <p class="selection-copy-kicker">COPY SELECTION</p>
@@ -216,6 +200,7 @@
 
       <div class="toast" id="viewer-toast" role="status" aria-live="polite"></div>
     </div>
+    <script src="js/word-lookup.js?v=20260824-dict-1"></script>
     <script src="js/reader.js?v=20260824-unified-reader-2"></script>
   </body>
 </html>
