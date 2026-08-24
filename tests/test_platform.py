@@ -705,6 +705,18 @@ class ReaderFrontendRegressionTests(unittest.TestCase):
         self.assertIn("aiHistoryRevision", self.javascript)
         self.assertIn("state.aiHistory = {}", self.javascript)
         self.assertIn("expectedRevision !== questionDataRevision", self.javascript)
+        # IME-safe Enter-to-send guards.
+        self.assertIn("compositionstart", self.javascript)
+        self.assertIn("keyCode === 229", self.javascript)
+        self.assertIn("isComposing", self.javascript)
+        # Unified history limits mirrored from the server contract.
+        self.assertIn("HISTORY_SEND_MAX = 12", self.javascript)
+        self.assertIn("HISTORY_CONTENT_MAX = 4000", self.javascript)
+        # Server-down banner and busy-locked scope switching.
+        self.assertIn("aiShowServerBanner", self.javascript)
+        self.assertIn("AI 正在回复，请稍候再切换模式", self.javascript)
+        # Freeform threads never mix with per-question history.
+        self.assertIn("threadForScope", self.javascript)
 
     def test_reader_preserves_agent_citations_and_safe_trace_summary(self) -> None:
         self.assertIn("function normalizeAiCitation(", self.javascript)

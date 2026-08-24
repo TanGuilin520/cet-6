@@ -222,7 +222,7 @@
 
   function normalizeStoredThread(value) {
     if (!Array.isArray(value)) return [];
-    return value.slice(-24).flatMap((message) => {
+    return value.slice(-THREAD_STORE_MAX).flatMap((message) => {
       const role = message?.role === 'assistant' ? 'assistant' : 'user';
       const content = String(message?.content || '').slice(0, 8000);
       if (!content.trim()) return [];
@@ -315,11 +315,18 @@
   let expandedQuestionId = '';
   let aiPanelQuestionId = '';
   let assistantRequestId = 0;
+  // Mirrors server/platform.py: MAX_ASSISTANT_HISTORY=12, per-message content
+  // cap 4000, storage threads capped separately so long replies stay readable.
+  const HISTORY_SEND_MAX = 12;
+  const HISTORY_CONTENT_MAX = 4000;
+  const THREAD_STORE_MAX = 24;
+  const SELECTED_TEXT_MAX = 8000;
   let aiScope = 'question';
   let aiSelectionText = '';
   let aiChatBusy = false;
   let aiCompositionActive = false;
   let aiLastFailure = null;
+  let aiPointerDownInsidePanel = false;
   const assistantPendingQuestions = new Set();
   const aiQuestionDrafts = new Map();
   let selectionChangeTimer = 0;
@@ -1420,6 +1427,23 @@
     }
   }
 
+  function aiShowServerBanner() {
+    const panel = $('#ai-question-panel');
+    if (!panel || $('.ai-server-banner', panel)) return;
+    const banner = makeElement('div', 'ai-server-banner');
+    banner.append(makeElement('b', '', '本地服务未连接'));
+    const p = makeElement('p', '', '请在项目目录运行：');
+    const code = document.createElement('code');
+    code.textContent = '.venv-main/bin/python -m server';
+    p.append(code);
+    banner.append(p);
+    panel.prepend(banner);
+  }
+
+  fetch('/api/exams/capabilities', { headers: { Accept: 'application/json' } })
+    .then((response) => { if (!response.ok) aiShowServerBanner(); })
+    .catch(() => aiShowServerBanner());
+
   const AI_SOURCE_BADGES = {
     official: { label: '含官方解析', className: 'ai-source-chip--official' },
     ai: { label: 'AI 辅助分析', className: 'ai-source-chip--ai' },
@@ -1640,6 +1664,23 @@
     return renderAiConversation(pending);
   }
 
+  let aiSelectionRefreshTimer = 0;
+  document.addEventListener('selectionchange', () => {
+    if (aiChatBusy) return;
+    clearTimeout(aiSelectionRefreshTimer);
+    aiSelectionRefreshTimer = setTimeout(() => {
+      const selection = window.getSelection();
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
+      const anchorNode = selection.anchorNode;
+      if (!anchorNode || !pagesNode?.contains(anchorNode.nodeType === Node.TEXT_NODE ? anchorNode.parentNode : anchorNode)) return;
+      const captured = capturePdfSelectionText();
+      if (captured && captured !== aiSelectionText) {
+        aiSelectionText = captured;
+        if (aiScope === 'selection') refreshAiScopeUi(false);
+      }
+    }, 250);
+  });
+
   const AI_QUICK_PROMPTS = {
     question: ['为什么不能选 A？', '解释正确答案', '分析我的错误', '翻译题目', '总结解题技巧'],
     writing: ['生成写作提纲', '给出开头示例', '检查语法', '优化表达'],
@@ -1680,18 +1721,21 @@
   }
 
   function setAiScope(scope, { silent = false, rerender = true } = {}) {
+    if (aiChatBusy) {
+      if (!silent) showToast('AI 正在回复，请稍候再切换模式');
+      return;
+    }
     if (!['general', 'question', 'selection'].includes(scope)) return;
     if (scope === 'question' && !questions.length) {
       if (!silent) showToast('当前试卷还没有题目，请先使用自由提问');
       return;
     }
     if (scope === 'selection') {
-      const captured = capturePdfSelectionText();
-      if (!captured) {
+      if (!aiSelectionText) aiSelectionText = capturePdfSelectionText();
+      if (!aiSelectionText) {
         if (!silent) showToast('请先在试卷上选中一段文字，再切换到选中文本模式');
         return;
       }
-      aiSelectionText = captured;
     }
     aiScope = scope;
     refreshAiScopeUi(rerender);
@@ -1803,8 +1847,18 @@
     if (!minimized) $('#ai-question-input')?.focus();
   }
 
-  function aiHistoryForRequest() {
-    return activeAiThread().slice(-12).map(({ role, content }) => ({ role, content }));
+  function threadForScope(scope, questionId) {
+    if (scope === 'general') return state.aiFreeHistory;
+    if (scope === 'selection') return state.aiSelectionHistory;
+    if (!Array.isArray(state.aiHistory[questionId])) state.aiHistory[questionId] = [];
+    return state.aiHistory[questionId];
+  }
+
+  function aiHistoryForRequest(thread) {
+    return (thread || activeAiThread()).slice(-HISTORY_SEND_MAX).map(({ role, content }) => ({
+      role,
+      content: String(content).slice(0, HISTORY_CONTENT_MAX),
+    }));
   }
 
   function aiSourceBadgeFromResponse(data) {
@@ -1828,58 +1882,64 @@
       return;
     }
 
-    const requestIdBase = ++assistantRequestId;
     const requestScope = aiScope;
     const requestQuestionId = requestScope === 'question' ? question.id : '';
-    const thread = activeAiThread();
-    thread.push({ role: 'user', content: cleanMessage });
-    if (thread.length > 24) thread.splice(0, thread.length - 24);
+    const targetThread = threadForScope(requestScope, requestQuestionId);
+    const requestIdBase = ++assistantRequestId;
+    targetThread.push({ role: 'user', content: cleanMessage });
+    if (targetThread.length > THREAD_STORE_MAX) targetThread.splice(0, targetThread.length - THREAD_STORE_MAX);
     aiLastFailure = null;
     $('#ai-retry-last').hidden = true;
     aiChatBusy = true;
     const sendButton = $('#ai-send-button');
     if (sendButton) sendButton.disabled = true;
+    $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => { button.disabled = true; });
     renderAiConversation(true);
     save();
 
     try {
       let body;
       if (requestScope === 'question') {
-        body = { scope: 'question', questionId: question.id, message: cleanMessage, history: aiHistoryForRequest().slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'question', questionId: question.id, message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
         const requestRevision = questionDataRevision;
-        if (Number.isInteger(requestRevision) && requestRevision >= 0) {
-          body.reviewRevision = requestRevision;
-          body._requestRevision = requestRevision;
-        }
+        if (Number.isInteger(requestRevision) && requestRevision >= 0) body.reviewRevision = requestRevision;
         const userAnswer = String(state.answers[question.id] || '').trim();
         if (userAnswer) body.userAnswer = userAnswer.slice(0, 100);
       } else if (requestScope === 'selection') {
-        body = { scope: 'selection', selectedText: aiSelectionText.slice(0, 8000), message: cleanMessage, history: aiHistoryForRequest().slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'selection', selectedText: aiSelectionText.slice(0, SELECTED_TEXT_MAX), message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
       } else {
-        body = { scope: 'general', message: cleanMessage, history: aiHistoryForRequest().slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'general', message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
       }
-      const expectedRevision = body._requestRevision;
-      delete body._requestRevision;
 
       const response = await fetch(paperConfig.assistantUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify(body),
       });
+      let data = null;
+      data = await response.json().catch(() => null);
       if (response.status === 409 && requestScope === 'question') {
         throw Object.assign(new Error('review revision changed'), { revisionChanged: true });
       }
-      if (!response.ok) throw new Error(`assistant request failed: ${response.status}`);
-      const data = await response.json();
+      if (!response.ok) {
+        const detail = String(data?.error || '').trim();
+        throw Object.assign(
+          new Error(detail || `assistant request failed: ${response.status}`),
+          { httpStatus: response.status },
+        );
+      }
+      const expectedRevision = Number.isInteger(body.reviewRevision) ? body.reviewRevision : null;
       if (
         requestScope === 'question'
-        && Number.isInteger(expectedRevision)
+        && expectedRevision !== null
         && Number.isInteger(data?.revision)
         && data.revision !== expectedRevision
       ) {
         throw Object.assign(new Error('assistant revision mismatch'), { revisionChanged: true });
       }
-      if (requestScope === 'question' && expectedRevision !== questionDataRevision) {
+      // A page refreshed under us means the request belongs to an older
+      // review snapshot; never mix its answer into the new one.
+      if (requestScope === 'question' && expectedRevision !== null && expectedRevision !== questionDataRevision) {
         throw Object.assign(new Error('stale request'), { revisionChanged: true, staleRequest: true });
       }
       let reply = String(data?.reply ?? '').trim();
@@ -1895,24 +1955,39 @@
       if (citations.length) assistantMessage.citations = citations;
       if (agent) assistantMessage.agent = agent;
       if (generation) assistantMessage.generation = generation;
-      activeAiThread().push(assistantMessage);
-      if (activeAiThread().length > 24) activeAiThread().splice(0, activeAiThread().length - 24);
-      aiLastFailure = null;
-      $('#ai-retry-last').hidden = true;
+      targetThread.push(assistantMessage);
+      if (targetThread.length > THREAD_STORE_MAX) targetThread.splice(0, targetThread.length - THREAD_STORE_MAX);
     } catch (error) {
+      // Roll the unanswered user turn back out of the thread so a retry never
+      // duplicates it, and give the input back to the user.
+      const lastMessage = targetThread[targetThread.length - 1];
+      if (lastMessage?.role === 'user' && lastMessage.content === cleanMessage) targetThread.pop();
+      const input = $('#ai-question-input');
+      if (input && !input.value.trim()) input.value = cleanMessage;
       if (error?.revisionChanged) {
         loadQuestionData();
         showToast('试卷解析已更新，请重新查看本题后再提问');
+      } else if (error instanceof TypeError) {
+        aiShowServerBanner();
+        showToast('无法连接本地服务，请确认服务器正在运行');
       } else {
         aiLastFailure = { scope: requestScope, questionId: requestQuestionId, message: cleanMessage };
-        const retryButton = $('#ai-retry-last');
-        if (retryButton) retryButton.hidden = false;
-        showToast('AI 回复失败，可点击“重试”再试一次');
+        $('#ai-retry-last').hidden = false;
+        const status = error?.httpStatus;
+        const reason = error?.message || '未知错误';
+        const prefix = status === 400 ? '请求被拒绝'
+          : status === 413 ? '内容过长'
+          : status === 502 || status === 503 ? 'AI 服务暂不可用'
+          : status === 504 ? 'AI 请求超时'
+          : '发送失败';
+        showToast(`${prefix}：${reason.slice(0, 80)}`);
       }
       console.warn('AI chat request failed:', error);
     } finally {
       aiChatBusy = false;
       if (sendButton) sendButton.disabled = false;
+      $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => { button.disabled = false; });
+      refreshAiScopeUi(false);
       renderAiConversation(false);
       save();
     }
@@ -2503,9 +2578,13 @@
     const button = event.target.closest('[data-thumbnail-page]');
     if (button) jumpToPage(button.dataset.thumbnailPage, true);
   });
-  document.addEventListener('pointerdown', () => { selectionPointerActive = true; }, { passive: true });
+  document.addEventListener('pointerdown', (event) => {
+    selectionPointerActive = true;
+    aiPointerDownInsidePanel = Boolean(event.target?.closest?.('#ai-question-panel'));
+  }, { passive: true });
   document.addEventListener('pointerup', () => {
     selectionPointerActive = false;
+    if (aiPointerDownInsidePanel) return;
     setTimeout(captureTextSelection, 0);
   });
   document.addEventListener('pointercancel', () => { selectionPointerActive = false; });

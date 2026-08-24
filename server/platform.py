@@ -3328,6 +3328,10 @@ class PlatformService:
                 "先直接回答问题，再补充解释；使用简短标题、自然段和列表；英语例句保留英文。"
             )
             user_content = message.strip()
+        system += (
+            "\n只输出一个合法 JSON 对象，顶层只允许一个字段：{\"reply\": \"面向用户的 Markdown 文本\"}。"
+            "reply 中禁止出现 questionId、trace、generation 等内部字段名，不得把 JSON 包进代码块。"
+        )
 
         outcome = self._direct_deepseek_chat(system, clean_history + [{"role": "user", "content": user_content[:28_000]}])
         reply = str(outcome["reply"] or "")

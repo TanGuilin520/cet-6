@@ -55,6 +55,23 @@ class ScopeRoutingTests(unittest.TestCase):
              patch("server.platform.urlopen", return_value=FakeResponse(deepseek_envelope(upstream_reply))):
             return assistant_service().assistant("exam-20250821-012345abcdef", payload)
 
+    def test_freeform_upstream_request_demands_reply_envelope(self):
+        captured = {}
+
+        def capture(request, timeout):
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse(deepseek_envelope("好的"))
+
+        with patch("server.platform.AgentClient.from_environment", return_value=NotConfiguredAgent()), \
+             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key-not-real"}), \
+             patch("server.platform.urlopen", side_effect=capture):
+            assistant_service().assistant("exam-20250821-012345abcdef", {
+                "scope": "general", "message": "怎么练听力？",
+            })
+        system_message = captured["payload"]["messages"][0]["content"]
+        self.assertIn('{"reply"', system_message)
+        self.assertEqual(captured["payload"]["response_format"], {"type": "json_object"})
+
     def test_general_mode_works_without_question_id(self):
         response = self.run_general({"scope": "general", "message": "英语学习计划怎么安排？"})
         self.assertEqual(response["scope"], "general")

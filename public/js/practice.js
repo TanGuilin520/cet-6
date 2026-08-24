@@ -1201,7 +1201,9 @@
     } catch (error) {
       let message = error?.name === 'AbortError'
         ? '请求超时，请检查网络后重试'
-        : String(error?.message || '对话请求失败，请重试');
+        : error instanceof TypeError
+          ? '本地服务未连接：请在项目目录运行 .venv-main/bin/python -m server'
+          : String(error?.message || '对话请求失败，请重试');
       if (message.includes('DeepSeek is not configured')) {
         message = '尚未配置 DeepSeek：请复制 .env.example 为 .env，填写服务端密钥并重启服务';
       }
