@@ -1,6 +1,6 @@
 """Dependency-free client adapter for the optional PaddleOCR sidecar.
 
-The main CET server intentionally runs on Python 3.8 without importing any
+The main CET server intentionally imports no machine-learning packages and
 machine-learning packages.  This module talks to a separately managed
 PaddleOCR process and converts its pixel-coordinate response into the page
 coordinate schema already consumed by the reader.

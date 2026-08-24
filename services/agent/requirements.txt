@@ -1,5 +1,6 @@
-# The CET main server remains on Python 3.8. Install these dependencies only
-# in the dedicated Python 3.11 agent runtime.
+# Install these dependencies only into the dedicated `.venv-agent` runtime.
+# Both the main server and this sidecar target Python 3.11 (.python-version);
+# the main server itself keeps zero third-party runtime dependencies.
 langgraph>=1.0,<2.0
 # 3.1.1 includes the upstream fixes for GHSA-9rwj-6rc7-p77c and
 # GHSA-47pj-3jcm-6whg and resolves with LangGraph 1.x checkpoint-core 4.x.

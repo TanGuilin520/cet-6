@@ -1,4 +1,7 @@
-FROM python:3.11-slim
+FROM python:3.11.16-slim
+
+# Fail the build immediately if the base image is not the pinned 3.11 series.
+RUN python --version | grep -q 'Python 3\.11\.' || (echo 'python:3.11.16-slim must report Python 3.11.x' && exit 1)
 
 ARG AGENT_UID=10001
 ARG AGENT_GID=10001

@@ -6,7 +6,10 @@
 # Python runtime files
 __pycache__/
 *.py[cod]
+# Project virtual environments (all created from Python 3.11)
+.venv-main/
 .venv-agent/
+.venv-paddleocr/
 
 # Dynamically generated pronunciation audio
 public/assets/audio/cache/

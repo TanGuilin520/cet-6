@@ -1,4 +1,4 @@
-# Keep the sidecar isolated from the Python 3.8 CET server.  These versions
+# Keep the sidecar isolated from the main server environment.  These versions
 # implement the PaddleOCR/PaddleX 3.7 contract used by app.py.
 paddleocr==3.7.0
 paddlex[ocr-core]==3.7.0

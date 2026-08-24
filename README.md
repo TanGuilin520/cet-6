@@ -53,10 +53,10 @@
 │       └── audio/                     # 预置及动态生成的单词音频
 ├── server/                            # Python 服务端代码
 │   ├── __init__.py
-│   ├── __main__.py                    # python3 -m server 入口
+│   ├── __main__.py                    # python -m server 入口（需 3.11+）
 │   ├── app.py                         # 静态服务、TTS、DeepSeek 代理
-│   ├── agent_client.py                # Python 3.8 到 Agent sidecar 的受限适配器
-│   ├── paddle_ocr.py                  # Python 3.8 PaddleOCR sidecar 客户端
+│   ├── agent_client.py                # 到 Agent sidecar 的受限适配器（Python 3.11）
+│   ├── paddle_ocr.py                  # PaddleOCR sidecar 客户端（Python 3.11）
 │   └── platform.py                    # 上传、PDF/OCR、复核、RAG 与资源 API
 ├── services/agent/                    # Python 3.11 LangGraph Agent runtime
 ├── services/paddleocr/                # 隔离运行的 PaddleOCR 3.7 服务
@@ -85,8 +85,15 @@
 
 ### 前置条件
 
-- Python 3.8–3.12（当前上传解析使用该版本范围内的标准库 multipart 支持）
-- Python 3.11+（仅在启用可选 LangGraph Agent runtime 时需要，使用独立虚拟环境）
+- Python 3.11（全项目统一目标版本，见 `.python-version`；主服务在低于 3.11 的解释器上会拒绝启动，3.12+ 兼容但 CI 固定 3.11）
+- 不要替换或删除 Ubuntu 系统自带的 `/usr/bin/python3`；用虚拟环境提供 3.11：
+
+```bash
+python3.11 -m venv .venv-main
+.venv-main/bin/python -m pip install -r services/agent/requirements.txt  # 仅 CI/E2E 需要
+```
+
+以下文档命令统一假设使用 `.venv-main/bin/python`（或 Docker）运行主服务。
 - 现代浏览器
 - Python 主服务本身使用标准库，不需要安装 Python 第三方包
 - 上传解析需要 Poppler：`pdftotext` 与 `pdftoppm`
@@ -95,10 +102,10 @@
 
 ### 启动
 
-在项目根目录执行：
+在项目根目录执行（需要 Python 3.11；系统解释器过低时主服务会拒绝启动并给出提示）：
 
 ```bash
-python3 -m server
+.venv-main/bin/python -m server
 ```
 
 然后打开：
@@ -114,7 +121,7 @@ TTS 和 DeepSeek 都依赖 Python 服务，直接在 `public/` 中运行静态�
 端口被占用时：
 
 ```bash
-python3 -m server --port 4174
+.venv-main/bin/python -m server --port 4174
 ```
 
 再访问 <http://127.0.0.1:4174/>。
@@ -137,7 +144,7 @@ DEEPSEEK_MODEL=deepseek-chat
 保存后重启服务：
 
 ```bash
-python3 -m server
+.venv-main/bin/python -m server
 ```
 
 密钥只由 Python 服务读取；网页源码、浏览器请求头和 `localStorage` 中不保存密钥。`.env` 已被 `.gitignore` 忽略。
@@ -145,7 +152,7 @@ python3 -m server
 也可以使用环境变量：
 
 ```bash
-DEEPSEEK_API_KEY='你的真实密钥' DEEPSEEK_MODEL='deepseek-chat' python3 -m server
+DEEPSEEK_API_KEY='你的真实密钥' DEEPSEEK_MODEL='deepseek-v4-flash' .venv-main/bin/python -m server
 ```
 
 ### DeepSeek 接口
@@ -174,7 +181,7 @@ Content-Type: application/json
 
 ### 可选 PaddleOCR
 
-PaddleOCR 不安装进主服务的 Python 3.8 环境，而是使用 Python 3.10/3.11 或 Docker 独立运行。这样即使模型服务未启动，文字型 PDF 和原有 OCR 回退仍能工作。
+PaddleOCR 不安装进主服务环境，而是使用独立的 `.venv-paddleocr`（Python 3.11）或 Docker 运行。这样即使模型服务未启动，文字型 PDF 和原有 OCR 回退仍能工作。
 
 完整安装、Docker volume、共享目录和 Token 配置见 [PaddleOCR sidecar 说明](services/paddleocr/README.md)。启动 sidecar 后在 `.env` 中配置：
 
@@ -189,7 +196,7 @@ CET_PADDLEOCR_SHARED_ROOT=/absolute/path/to/cet-6/data/exams
 
 ### 可选 LangGraph Agent
 
-Agent 依赖不安装进主服务，而是在 Python 3.11 独立环境运行：
+Agent 依赖不安装进主服务环境，而是使用独立的 `.venv-agent`（同样是 Python 3.11，依赖隔离）运行：
 
 ```bash
 python3.11 -m venv .venv-agent
@@ -215,7 +222,7 @@ CET_AGENT_TOKEN=替换为与sidecar相同的随机Token
 CET_AGENT_TIMEOUT_SECONDS=40
 ```
 
-重启 `python3 -m server` 后，`/api/exams/capabilities` 的 `agent.ready` 应为 `true`。未配置 Agent 时系统不会失去已有功能；Reader 回退到原来的本地/DeepSeek 路径，Review 仍可手动完成。完整拓扑与公开契约见 [Agent 架构文档](docs/agent-architecture.md)，Docker 和 sidecar 内部契约见 [Agent runtime 说明](services/agent/README.md)。
+重启 `.venv-main/bin/python -m server` 后，`/api/exams/capabilities` 的 `agent.ready` 应为 `true`。未配置 Agent 时系统不会失去已有功能；Reader 回退到原来的本地/DeepSeek 路径，Review 仍可手动完成。完整拓扑与公开契约见 [Agent 架构文档](docs/agent-architecture.md)，Docker 和 sidecar 内部契约见 [Agent runtime 说明](services/agent/README.md)。
 
 ## 5. 使用流程
 
@@ -263,11 +270,11 @@ CET_AGENT_TIMEOUT_SECONDS=40
 
 ### 点击单词没有声音
 
-确认页面由 `python3 -m server` 提供，检查浏览器标签页的静音状态和系统音量。预置词使用 `public/assets/audio/*.wav`；其他词需要本机安装 `flite`，否则会使用浏览器语音合成。
+确认页面由 Python 3.11 的 `.venv-main/bin/python -m server` 提供，检查浏览器标签页的静音状态和系统音量。预置词使用 `public/assets/audio/*.wav`；其他词需要本机安装 `flite`，否则会使用浏览器语音合成。
 
 ### AI 助手提示未配置
 
-确认 `.env` 位于项目根目录、`DEEPSEEK_API_KEY` 已填写，并重启 `python3 -m server`。同时确认网络和 DeepSeek 账户额度可用。
+确认 `.env` 位于项目根目录、`DEEPSEEK_API_KEY` 已填写，并重启 `.venv-main/bin/python -m server`。同时确认网络和 DeepSeek 账户额度可用。
 
 配置后，本题题干、用户问题和检索到的答案资料会发送给 DeepSeek；不要在未披露该数据边界的情况下把服务直接提供给第三方用户。未配置时使用本地保守回答，不会猜测缺失解析。
 

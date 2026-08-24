@@ -1,7 +1,8 @@
 # CET LangGraph agent runtime
 
 This optional Python 3.11 sidecar adds a bounded, auditable Agent workflow
-without changing the existing Python 3.8 PDF reader server. It exposes two
+without adding any dependency to the main PDF reader server (also Python
+3.11, see `.python-version`). It exposes two
 graphs:
 
 - `POST /v1/tutor`: route a question, read only the supplied question/answer
@@ -15,9 +16,10 @@ database-write tool. Evidence is untrusted data and is available only through
 the request body supplied by the main CET server. Deterministic OCR, grading,
 revision publication, and ETag checks remain in the main application.
 
-LangGraph is imported lazily. Importing `services.agent.app` under the current
-Python 3.8 server is safe, but `/healthz` reports `not_ready` there. A ready
-runtime requires Python 3.11+, LangGraph, and a writable SQLite checkpoint. It
+LangGraph is imported lazily. Importing `services.agent.app` from the main
+server process stays safe, but `/healthz` reports `not_ready` until the
+sidecar runs with its own LangGraph installation. A ready runtime requires
+Python 3.11+, LangGraph, and a writable SQLite checkpoint. It
 does not silently fall back to an in-memory checkpointer.
 
 Official references:
@@ -31,7 +33,7 @@ Official references:
 From the repository root:
 
 ```bash
-python3.11 -m venv .venv-agent
+.venv-main/bin/python -m venv .venv-agent
 .venv-agent/bin/python -m pip install -r services/agent/requirements.txt
 mkdir -p data/agent
 CET_AGENT_CHECKPOINT_PATH="$PWD/data/agent/checkpoints.sqlite3" \

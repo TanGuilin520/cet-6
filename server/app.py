@@ -106,6 +106,27 @@ def configured_deepseek_key() -> str:
     return "" if api_key in DEEPSEEK_KEY_PLACEHOLDERS else api_key
 
 
+MINIMUM_PYTHON_VERSION = (3, 11)
+
+
+def require_python_311() -> None:
+    """Refuse to start below the project-wide Python 3.11 baseline.
+
+    Python 3.12+ is intentionally allowed; only CI and deployment pin 3.11.
+    """
+
+    if sys.version_info[:2] < MINIMUM_PYTHON_VERSION:
+        major, minor, micro = sys.version_info[:3]
+        raise SystemExit(
+            "CET server requires Python 3.11 or newer; "
+            f"this interpreter is {major}.{minor}.{micro}. "
+            "Create the project virtual environment with "
+            "`python3.11 -m venv .venv-main` and start it via "
+            "`.venv-main/bin/python -m server` (see README section 3). "
+            "The system /usr/bin/python3 must not be replaced."
+        )
+
+
 class ReadingLabHandler(SimpleHTTPRequestHandler):
     """Serve the local prototype, pronunciation, and DeepSeek proxy."""
 
@@ -512,6 +533,7 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
 
 
 def main() -> int:
+    require_python_311()
     parser = argparse.ArgumentParser(description="Serve Reading Lab with local TTS and a DeepSeek proxy.")
     parser.add_argument("--host", default="127.0.0.1", help="host interface (default: 127.0.0.1)")
     parser.add_argument("--port", default=4173, type=int, help="TCP port (default: 4173)")

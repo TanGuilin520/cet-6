@@ -1,7 +1,8 @@
 # PaddleOCR optional sidecar
 
-This service keeps PaddleOCR and PaddlePaddle out of the CET server's Python
-3.8 standard-library environment. It reads temporary PNG pages by relative path
+This service keeps PaddleOCR and PaddlePaddle out of the main CET server
+environment (the main server itself is Python 3.11 with zero third-party
+dependencies; see `.python-version`). It reads temporary PNG pages by relative path
 from one shared, explicitly allowed directory and returns a small versioned JSON contract over
 HTTP. It does not read PDFs, generate the final manifest, fetch URLs, or replace
 the existing OCRmyPDF/Tesseract fallback.
@@ -10,7 +11,7 @@ the existing OCRmyPDF/Tesseract fallback.
 
 PaddleOCR 3.7 declares Python 3.8 or newer, but its document-parser extras need
 Python 3.9 or newer, and current PaddlePaddle 3.3 Linux wheels list Python
-3.9–3.13. Run this sidecar on Python 3.10 or 3.11 and install only basic OCR.
+3.9–3.13. Run this sidecar on Python 3.11 and install only basic OCR.
 The supplied CPU image pins PaddleOCR/PaddleX 3.7 and the PaddlePaddle 3.2 engine
 documented by PaddleOCR. Validate and lock a different CPU/GPU engine as one
 unit before upgrading it.
@@ -24,7 +25,7 @@ Official references:
 
 ## Local CPU run
 
-Create a dedicated Python 3.10/3.11 virtual environment, then install the
+Create a dedicated Python 3.11 virtual environment (`.venv-paddleocr`), then install the
 inference engine and sidecar dependencies:
 
 ```bash

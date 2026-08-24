@@ -19,21 +19,21 @@ Browser
   └── review.html  ── 建议预览、人工应用到表单
           │
           ▼
-Python 3.8 main server :4173
+Python 3.11 main server :4173
   ├── PDF/OCR/manifest/questions/answers
   ├── revision + ETag + audit snapshot
   ├── Question ID exact retrieval + local vector supplement
   └── bounded Agent adapter
           │ revision-pinned JSON + optional Bearer token
           ▼
-Python 3.11 Agent runtime :8770
+Python 3.11 Agent sidecar :8770
   ├── LangGraph state graphs
   ├── SQLite checkpoints
   ├── context-only tools
   └── optional DeepSeek grounded drafting
 ```
 
-主服务保持 Python 3.8 和零第三方运行依赖；LangGraph 及其 SQLite checkpointer 只安装在 Python 3.11 sidecar。未启动或未配置 sidecar 时，上传、解析、阅读、人工复核、批改以及原来的保守问答仍可使用。
+主服务与 sidecar 都运行在 Python 3.11（`.python-version` 统一目标）；主服务保持零第三方运行依赖，LangGraph 及其 SQLite checkpointer 只安装在 `.venv-agent` sidecar 环境。未启动或未配置 sidecar 时，上传、解析、阅读、人工复核、批改以及原来的保守问答仍可使用。
 
 ## 3. 两条 Agent 工作流
 
@@ -82,7 +82,7 @@ load_review_issue
 创建独立环境：
 
 ```bash
-python3.11 -m venv .venv-agent
+.venv-main/bin/python -m venv .venv-agent  # 同一 3.11 解释器，依赖隔离
 .venv-agent/bin/pip install -r services/agent/requirements.txt
 ```
 

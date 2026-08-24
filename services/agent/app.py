@@ -2,10 +2,10 @@
 """Bounded LangGraph sidecar for CET tutoring and review suggestions.
 
 The module deliberately has no third-party imports at import time.  The main
-CET process still runs on Python 3.8 and may import this module in protocol
-tests; LangGraph and its SQLite checkpointer are loaded only when runtime
-readiness is requested.  Production execution belongs in a separate Python
-3.11 process.
+CET process keeps zero third-party runtime dependencies and may import this
+module in protocol tests; LangGraph and its SQLite checkpointer are loaded
+only when runtime readiness is requested.  Production execution belongs in
+the dedicated Python 3.11 `.venv-agent` process.
 
 The sidecar is not a general-purpose agent sandbox.  Its tools can read only
 the validated ``context`` supplied by the CET server.  The review graph emits

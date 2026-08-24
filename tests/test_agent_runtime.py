@@ -418,7 +418,7 @@ class AgentHTTPTests(unittest.TestCase):
         )
         self.assertEqual(oversized.response_status, 413)
 
-    def test_python38_health_is_not_ready_without_importing_langgraph(self):
+    def test_pre_311_interpreter_reports_not_ready_without_importing_langgraph(self):
         with TemporaryDirectory() as temporary:
             runtime = AgentRuntime(checkpoint_path=Path(temporary) / "checkpoints.sqlite3")
             application = AgentApplication(runtime=runtime)
@@ -429,6 +429,63 @@ class AgentHTTPTests(unittest.TestCase):
         self.assertFalse(document["ready"])
         self.assertFalse(document["langgraphImportReady"])
         self.assertFalse(document["checkpointReady"])
+
+
+class LangGraphRuntimeSmokeTests(unittest.TestCase):
+    """Compile and invoke the real graphs when LangGraph is installed.
+
+    CI installs services/agent/requirements.txt on Python 3.11 and runs this
+    class explicitly.  Without LangGraph the whole class is skipped so the
+    plain stdlib test run stays dependency-free.
+    """
+
+    def langgraph_available(self):
+        try:
+            import langgraph.graph  # noqa: F401
+            import langgraph.checkpoint.sqlite  # noqa: F401
+        except ImportError:
+            self.skipTest("LangGraph is not installed in this environment")
+
+    def test_real_tutor_graph_compiles_and_invokes_with_deterministic_fallback(self):
+        self.langgraph_available()
+        with TemporaryDirectory() as temporary:
+            runtime = AgentRuntime(checkpoint_path=Path(temporary) / "checkpoints.sqlite3")
+            self.assertTrue(runtime.ready, runtime.detail)
+            document = runtime.invoke_tutor(validate_tutor_request(tutor_request()))
+
+        self.assertEqual(document["status"], "completed")
+        self.assertEqual(
+            document["trace"]["nodes"],
+            [
+                "route_intent",
+                "read_context_tools",
+                "retrieve_grounded_evidence",
+                "draft_grounded_reply",
+                "grounding_guard",
+                "finalize_tutor",
+            ],
+        )
+        self.assertIn("C", document["reply"])
+
+    def test_real_review_graph_compiles_and_stays_suggest_only(self):
+        self.langgraph_available()
+        with TemporaryDirectory() as temporary:
+            runtime = AgentRuntime(checkpoint_path=Path(temporary) / "checkpoints.sqlite3")
+            self.assertTrue(runtime.ready, runtime.detail)
+            document = runtime.invoke_review(validate_review_request(review_request()))
+
+        self.assertEqual(document["policy"], "suggest_only")
+        self.assertNotIn("generation", document)
+        self.assertEqual(
+            document["trace"]["nodes"],
+            [
+                "load_review_issue",
+                "retrieve_review_evidence",
+                "build_suggest_only_proposal",
+                "suggestion_policy_guard",
+                "finalize_review_suggestion",
+            ],
+        )
 
 
 if __name__ == "__main__":

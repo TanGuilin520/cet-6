@@ -13,7 +13,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.8", "3.12"]
+        # The whole project targets Python 3.11 (.python-version). 3.12+ is
+        # tolerated at runtime but CI and deployment pin the 3.11 series.
+        python-version: ["3.11"]
 
     steps:
       - name: Check out repository
@@ -24,31 +26,46 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
+      - name: Show interpreter version
+        run: python --version
 
-      - name: Compile Python sources
+      - name: Install LangGraph runtime dependencies (no DeepSeek key, no network calls)
+        run: python -m pip install -r services/agent/requirements.txt
+
+      - name: Compile all Python entry points
         run: >-
           python -m py_compile
           server/app.py
           server/platform.py
+          server/dictionary.py
+          server/agent_client.py
           server/paddle_ocr.py
           server/__main__.py
+          services/agent/app.py
           services/paddleocr/app.py
           tools/build_exam_assets.py
+          tools/run_agent_evals.py
+
+      - name: Validate agent eval fixtures
+        run: python tools/run_agent_evals.py --validate-only
 
       - name: Check browser scripts
         run: |
           node --check public/js/home.js
           node --check public/js/upload.js
+          node --check public/js/review.js
           node --check public/js/reader.js
           node --check public/js/practice.js
-          if [ -f public/js/review.js ]; then node --check public/js/review.js; fi
+          if [ -f public/js/word-lookup.js ]; then node --check public/js/word-lookup.js; fi
 
-      - name: Run unit and regression tests
+      - name: Run unit and regression tests (external services mocked)
+        env:
+          # Ensure tests never touch the real DeepSeek API.
+          DEEPSEEK_API_KEY: ""
         run: python -m unittest discover -s tests -v
+
+      - name: Real LangGraph graphs compile and invoke on 3.11
+        run: python -m unittest tests.test_agent_runtime.LangGraphRuntimeSmokeTests -v
 
       - name: Check patch whitespace
         run: git diff --check
