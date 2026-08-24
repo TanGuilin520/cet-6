@@ -517,7 +517,7 @@ class PlatformAntiDoubleCallTests(unittest.TestCase):
             configured = False
 
         success_payload = json.dumps({
-            "choices": [{"message": {"content": "直接回答"}}],
+            "choices": [{"message": {"content": json.dumps({"reply": "直接回答"}, ensure_ascii=False)}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
         }).encode()
 
@@ -532,6 +532,25 @@ class PlatformAntiDoubleCallTests(unittest.TestCase):
         self.assertTrue(response["generation"]["used"])
         self.assertEqual(response["generation"]["model"], "deepseek-v4-flash")
         self.assertIn("直接回答", response["reply"])
+
+    def test_direct_path_rejects_raw_non_json_content(self):
+        service = self.assistant_service()
+
+        class NotConfigured:
+            configured = False
+
+        raw_payload = json.dumps({
+            "choices": [{"message": {"content": "这是一段没有被 JSON 信封包裹的回答"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }).encode()
+
+        with patch("server.platform.AgentClient.from_environment", return_value=NotConfigured()), \
+             patch.dict(os.environ, {"DEEPSEEK_API_KEY": "real-key"}), \
+             patch("server.platform.urlopen", return_value=FakeResponse(raw_payload)):
+            response = service.assistant("exam-20250821-012345abcdef", {"questionId": "q1", "message": "Why?"})
+        self.assertFalse(response["generation"]["used"])
+        self.assertEqual(response["generation"]["fallbackReason"], "invalid_response")
+        self.assertNotIn("没有被 JSON 信封包裹", response["reply"])
 
     def test_direct_failure_keeps_deterministic_answer_with_reason(self):
         service = self.assistant_service()

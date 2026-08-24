@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#243746" />
     <title>完整试卷 · CET-4 Exam Viewer</title>
     <link rel="preload" href="assets/papers/2021-06-set-01/pages/page-1.jpg" as="image" type="image/jpeg" />
-    <link rel="stylesheet" href="css/reader.css?v=20260824-unified-reader-2" />
+    <link rel="stylesheet" href="css/reader.css?v=20260824-ai-chat-1" />
     <link rel="stylesheet" href="css/word-lookup.css?v=20260824-dict-1" />
   </head>
   <body>
@@ -183,24 +183,35 @@
       <div class="panel-backdrop panel-backdrop--ai" id="ai-panel-backdrop" hidden></div>
       <aside class="ai-question-panel" id="ai-question-panel" aria-hidden="true" aria-labelledby="ai-question-title">
         <header>
-          <div><p>AI QUESTION COACH</p><h2 id="ai-question-title">本题 AI 助手</h2></div>
+          <div><p>AI STUDY COACH</p><h2 id="ai-question-title">AI 学习助手</h2></div>
           <div class="ai-question-header-actions">
             <button id="minimize-ai-question" type="button" aria-label="最小化 AI 助手" aria-controls="ai-question-panel" aria-expanded="true">−</button>
             <button id="close-ai-question" type="button" aria-label="关闭 AI 助手">×</button>
           </div>
         </header>
+        <div class="ai-scope-switcher" role="tablist" aria-label="对话上下文模式">
+          <button type="button" role="tab" data-ai-scope="general" aria-selected="false">自由提问</button>
+          <button type="button" role="tab" data-ai-scope="question" aria-selected="true">当前题目</button>
+          <button type="button" role="tab" data-ai-scope="selection" aria-selected="false" id="ai-scope-selection" title="先在试卷上选中一段文字">选中文本</button>
+        </div>
         <p class="ai-question-context" id="ai-question-context">先从题号导航选择一道题。</p>
+        <div class="ai-quick-prompts" id="ai-quick-prompts" aria-label="快捷提问"></div>
         <div class="ai-question-messages" id="ai-question-messages" aria-live="polite"></div>
+        <div class="ai-thread-actions">
+          <button type="button" id="ai-new-chat" class="ai-text-button" title="清空当前对话">新建对话</button>
+          <button type="button" id="ai-copy-last" class="ai-text-button" title="复制最近一条 AI 回复">复制回复</button>
+          <button type="button" id="ai-retry-last" class="ai-text-button" hidden title="重试上一条失败的提问">重试</button>
+        </div>
         <form class="ai-question-form" id="ai-question-form">
-          <label for="ai-question-input">针对当前题提问</label>
+          <label for="ai-question-input" id="ai-input-label">针对当前题提问（Enter 发送，Shift+Enter 换行）</label>
           <textarea id="ai-question-input" rows="3" maxlength="2000" placeholder="例如：为什么不能选 B？原文证据在哪里？" required></textarea>
-          <button type="submit">发送问题</button>
+          <button type="submit" id="ai-send-button">发送问题</button>
         </form>
       </aside>
 
       <div class="toast" id="viewer-toast" role="status" aria-live="polite"></div>
     </div>
     <script src="js/word-lookup.js?v=20260824-dict-1"></script>
-    <script src="js/reader.js?v=20260824-unified-reader-2"></script>
+    <script src="js/reader.js?v=20260824-ai-chat-1"></script>
   </body>
 </html>

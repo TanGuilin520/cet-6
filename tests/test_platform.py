@@ -704,7 +704,7 @@ class ReaderFrontendRegressionTests(unittest.TestCase):
         self.assertIn("response.status === 409", self.javascript)
         self.assertIn("aiHistoryRevision", self.javascript)
         self.assertIn("state.aiHistory = {}", self.javascript)
-        self.assertIn("requestRevision !== questionDataRevision", self.javascript)
+        self.assertIn("expectedRevision !== questionDataRevision", self.javascript)
 
     def test_reader_preserves_agent_citations_and_safe_trace_summary(self) -> None:
         self.assertIn("function normalizeAiCitation(", self.javascript)

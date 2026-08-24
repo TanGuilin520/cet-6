@@ -183,6 +183,8 @@ Content-Type: application/json
 
 服务端固定请求 DeepSeek 官方 Chat Completions 地址，并限制请求体大小、消息数量、单条文本长度和消息角色。也兼容 `POST /api/chat`。
 
+AI 助手支持三种对话模式，通过请求中的 `scope` 字段选择：`question`（当前题，题号精确检索 + 答案 PDF 优先）、`general`（自由提问，不读取答案资料、不声称官方解析）、`selection`（针对选中文本提问，最多 8,000 字符）。旧请求不带 `scope` 但带 `questionId` 时仍按题目模式处理。模型只被允许返回 `{"reply": "面向用户的 Markdown"}` 信封；后端负责解析与校验，非法输出安全降级为确定性提示，浏览器永远不会看到原始 JSON。
+
 ### 可选 PaddleOCR
 
 PaddleOCR 不安装进主服务环境，而是使用独立的 `.venv-paddleocr`（Python 3.11）或 Docker 运行。这样即使模型服务未启动，文字型 PDF 和原有 OCR 回退仍能工作。
