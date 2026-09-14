@@ -7,7 +7,7 @@
     <meta name="theme-color" content="#243746" />
     <title>完整试卷 · CET-4 Exam Viewer</title>
     <link rel="preload" href="assets/papers/2021-06-set-01/pages/page-1.jpg" as="image" type="image/jpeg" />
-    <link rel="stylesheet" href="css/reader.css?v=20260824-ai-chat-1" />
+    <link rel="stylesheet" href="css/reader.css?v=20260913-ai-reliability-1" />
     <link rel="stylesheet" href="css/word-lookup.css?v=20260824-dict-1" />
   </head>
   <body>
@@ -192,11 +192,13 @@
         <div class="ai-scope-switcher" role="tablist" aria-label="对话上下文模式">
           <button type="button" role="tab" data-ai-scope="general" aria-selected="false">自由提问</button>
           <button type="button" role="tab" data-ai-scope="question" aria-selected="true">当前题目</button>
-          <button type="button" role="tab" data-ai-scope="selection" aria-selected="false" id="ai-scope-selection" title="先在试卷上选中一段文字">选中文本</button>
+          <button type="button" role="tab" data-ai-scope="selection" aria-selected="false" id="ai-scope-selection" title="先在试卷上选中一段文字" disabled>选中文本</button>
         </div>
         <p class="ai-question-context" id="ai-question-context">先从题号导航选择一道题。</p>
+        <blockquote class="ai-selection-excerpt" id="ai-selection-excerpt" hidden></blockquote>
         <div class="ai-quick-prompts" id="ai-quick-prompts" aria-label="快捷提问"></div>
         <div class="ai-question-messages" id="ai-question-messages" aria-live="polite"></div>
+        <p class="ai-chat-status" id="ai-chat-status" role="status" aria-live="polite" hidden></p>
         <div class="ai-thread-actions">
           <button type="button" id="ai-new-chat" class="ai-text-button" title="清空当前对话">新建对话</button>
           <button type="button" id="ai-copy-last" class="ai-text-button" title="复制最近一条 AI 回复">复制回复</button>
@@ -212,6 +214,6 @@
       <div class="toast" id="viewer-toast" role="status" aria-live="polite"></div>
     </div>
     <script src="js/word-lookup.js?v=20260824-dict-1"></script>
-    <script src="js/reader.js?v=20260824-ai-chat-1"></script>
+    <script src="js/reader.js?v=20260913-ai-reliability-1"></script>
   </body>
 </html>

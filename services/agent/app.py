@@ -47,7 +47,7 @@ SERVICE_NAME = "cet-agent-runtime"
 ENGINE_NAME = "langgraph"
 
 MAX_REQUEST_BYTES = 512 * 1024
-MAX_MESSAGE_CHARS = 4_000
+MAX_MESSAGE_CHARS = 8_000
 MAX_HISTORY_MESSAGES = 12
 MAX_HISTORY_CHARS = 4_000
 MAX_CONTEXT_TEXT_CHARS = 20_000
@@ -88,8 +88,11 @@ FALLBACK_REASONS = frozenset(
         "blocked_mutation",
         "upstream_timeout",
         "upstream_auth_error",
+        "upstream_insufficient_balance",
         "upstream_rate_limited",
+        "upstream_request_error",
         "upstream_server_error",
+        "upstream_response_truncated",
         "invalid_response",
         "agent_transport_error",
     }
@@ -471,7 +474,7 @@ def validate_tutor_request(value: Any) -> Dict[str, Any]:
     history: List[Dict[str, str]] = []
     for index, raw in enumerate(raw_history):
         entry = _exact_object(raw, {"role", "content"}, f"history[{index}]")
-        if entry["role"] not in {"user", "assistant"}:
+        if not isinstance(entry["role"], str) or entry["role"] not in {"user", "assistant"}:
             raise RequestError(f"history[{index}].role must be user or assistant")
         history.append(
             {
@@ -715,24 +718,35 @@ class DeepSeekClient:
                 # A read timeout means the result is unknown; the request may
                 # still be billed, so it is never silently repeated here.
                 return ModelOutcome(attempted=True, fallback_reason="upstream_timeout")
-            except (URLError, OSError):
+            except URLError as error:
+                if isinstance(error.reason, (TimeoutError, socket.timeout)):
+                    return ModelOutcome(attempted=True, fallback_reason="upstream_timeout")
+                return ModelOutcome(attempted=True, fallback_reason="upstream_server_error")
+            except OSError:
                 return ModelOutcome(attempted=True, fallback_reason="upstream_server_error")
             break
         if media_type != "application/json" or len(raw) > MAX_MODEL_RESPONSE_BYTES:
             return ModelOutcome(attempted=True, fallback_reason="invalid_response")
         try:
             document = json.loads(raw.decode("utf-8"))
-            content = document["choices"][0]["message"]["content"]
+            choice = document["choices"][0]
+            content = choice["message"]["content"]
             usage = self._sanitize_usage(document.get("usage"))
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError, RecursionError):
+            return ModelOutcome(attempted=True, fallback_reason="invalid_response")
+        if choice.get("finish_reason") == "length":
+            return ModelOutcome(attempted=True, fallback_reason="upstream_response_truncated")
+        if choice.get("finish_reason") not in (None, "stop"):
             return ModelOutcome(attempted=True, fallback_reason="invalid_response")
         if not isinstance(content, str) or not content.strip():
             return ModelOutcome(attempted=True, fallback_reason="invalid_response")
         try:
             parsed = json.loads(content)
-            reply = parsed["reply"]
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, RecursionError):
             return ModelOutcome(attempted=True, fallback_reason="invalid_response", usage=usage)
+        if not isinstance(parsed, dict) or set(parsed) != {"reply"}:
+            return ModelOutcome(attempted=True, fallback_reason="invalid_response", usage=usage)
+        reply = parsed["reply"]
         if not isinstance(reply, str):
             return ModelOutcome(attempted=True, fallback_reason="invalid_response", usage=usage)
         reply = reply.strip()
@@ -746,8 +760,12 @@ class DeepSeekClient:
             return "upstream_auth_error"
         if code == HTTPStatus.TOO_MANY_REQUESTS:
             return "upstream_rate_limited"
-        if code in RETRYABLE_HTTP_CODES:
-            return "upstream_server_error"
+        if code == HTTPStatus.PAYMENT_REQUIRED:
+            return "upstream_insufficient_balance"
+        if code in {HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.GATEWAY_TIMEOUT}:
+            return "upstream_timeout"
+        if 400 <= code < 500:
+            return "upstream_request_error"
         return "upstream_server_error"
 
     @staticmethod

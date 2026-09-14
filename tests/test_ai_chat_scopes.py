@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import io
 import os
+import socket
+from urllib.error import HTTPError, URLError
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,6 +17,8 @@ from http import HTTPStatus
 import server.platform as platform_module
 from server.platform import PlatformService
 from services.agent.app import ModelOutcome
+from services.agent.app import DeepSeekClient
+from server.agent_client import _validate_generation
 
 from tests.test_deepseek_agent_integration import ENV_KEY  # noqa: F401  (re-exported for readability)
 from tests.test_deepseek_agent_integration import FakeResponse
@@ -166,7 +171,8 @@ class ScopeRoutingTests(unittest.TestCase):
             })
         self.assertFalse(response["generation"]["used"])
         self.assertIn("暂时无法生成 AI 回复", response["reply"])
-        self.assertIn("DEEPSEEK_API_KEY", response["reply"])
+        self.assertIn("配置 AI 服务", response["reply"])
+        self.assertEqual(response["generation"]["fallbackReason"], "not_configured")
         # The deterministic guidance must never masquerade as an official analysis.
         self.assertNotIn("官方解析", response["reply"].split("\n")[0])
 
@@ -184,6 +190,71 @@ class GenerationContractTests(unittest.TestCase):
         generation = outcome.generation("deepseek-v4-flash")
         self.assertTrue(generation["used"])
         self.assertEqual(generation["usage"]["totalTokens"], 9)
+
+
+class UpstreamFailureTests(unittest.TestCase):
+    def clients(self):
+        return (
+            ("server.platform.urlopen", lambda: assistant_service()._direct_deepseek_chat("Help", [{"role": "user", "content": "test"}])),
+            ("services.agent.app.urlopen", lambda: DeepSeekClient(env=ENV_KEY).complete("Help", [{"role": "user", "content": "test"}])),
+        )
+
+    def assert_failure(self, result, reason):
+        generation = result["generation"] if isinstance(result, dict) else result.generation("deepseek-v4-flash")
+        self.assertFalse(generation["used"])
+        self.assertEqual(generation["fallbackReason"], reason)
+        self.assertIsNone(generation["usage"])
+        _validate_generation(generation)
+
+    def test_http_failures_have_consistent_safe_reasons(self):
+        for code, reason in ((400, "upstream_request_error"), (402, "upstream_insufficient_balance"), (401, "upstream_auth_error")):
+            for target, invoke in self.clients():
+                with self.subTest(code=code, target=target), \
+                     patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key-not-real"}), \
+                     patch(target, side_effect=HTTPError("https://api.deepseek.com", code, "error", {}, io.BytesIO(b"private upstream details"))) as transport:
+                    result = invoke()
+                    self.assert_failure(result, reason)
+                    self.assertEqual(transport.call_count, 1)
+                    self.assertNotIn("private upstream details", str(result))
+
+    def test_direct_and_wrapped_timeouts_never_retry(self):
+        for error in (socket.timeout("slow"), URLError(socket.timeout("slow"))):
+            for target, invoke in self.clients():
+                with self.subTest(error=type(error).__name__, target=target), \
+                     patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key-not-real"}), \
+                     patch(target, side_effect=error) as transport:
+                    self.assert_failure(invoke(), "upstream_timeout")
+                    self.assertEqual(transport.call_count, 1)
+
+    def test_truncated_or_wrong_schema_never_becomes_a_successful_answer(self):
+        for finish, content, reason in (
+            ("length", '{"reply":"partial"}', "upstream_response_truncated"),
+            ("stop", '{"reply":"ok","internal":"extra"}', "invalid_response"),
+            ("stop", '[]', "invalid_response"),
+            ("stop", '{"reply":null}', "invalid_response"),
+        ):
+            response = json.dumps({"choices": [{"finish_reason": finish, "message": {"content": content}}],
+                                   "usage": {"prompt_tokens": 2, "completion_tokens": 3, "total_tokens": 5}}).encode()
+            for target, invoke in self.clients():
+                with self.subTest(finish=finish, content=content, target=target), \
+                     patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key-not-real"}), \
+                     patch(target, return_value=FakeResponse(response)):
+                    self.assert_failure(invoke(), reason)
+
+    def test_shared_boundary_adds_contract_for_every_caller(self):
+        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "test-key-not-real"}), \
+             patch("server.platform.urlopen", return_value=FakeResponse(deepseek_envelope("ok"))) as transport:
+            assistant_service()._direct_deepseek_chat("Translate English", [{"role": "user", "content": "Hello"}])
+        payload = json.loads(transport.call_args.args[0].data)
+        self.assertIn('{"reply"', payload["messages"][0]["content"])
+
+    def test_constructing_service_does_not_rewrite_existing_jobs(self):
+        with patch.object(PlatformService, "_recover_interrupted_jobs") as recover:
+            service = PlatformService()
+            try:
+                recover.assert_not_called()
+            finally:
+                service._executor.shutdown(wait=False)
 
 
 if __name__ == "__main__":

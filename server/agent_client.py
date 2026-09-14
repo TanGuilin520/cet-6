@@ -38,8 +38,11 @@ SUPPORTED_FALLBACK_REASONS = frozenset(
         "blocked_mutation",
         "upstream_timeout",
         "upstream_auth_error",
+        "upstream_insufficient_balance",
         "upstream_rate_limited",
+        "upstream_request_error",
         "upstream_server_error",
+        "upstream_response_truncated",
         "invalid_response",
         "agent_transport_error",
     }

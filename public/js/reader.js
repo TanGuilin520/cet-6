@@ -40,6 +40,13 @@
   const MAX_TEMPLATE_FILE_BYTES = 64 * 1024;
   const MAX_TEMPLATE_SOURCE_CHARS = 12000;
   const MAX_LONG_ANSWER_CHARS = 12000;
+  // Keep request limits aligned with the server; define them before restoring
+  // saved threads so reloading an existing conversation is safe.
+  const HISTORY_SEND_MAX = 12;
+  const HISTORY_CONTENT_MAX = 4000;
+  const THREAD_STORE_MAX = 24;
+  const SELECTED_TEXT_MAX = 8000;
+  const AI_REQUEST_MAX_BYTES = 48 * 1024;
   const viewer = $('#exam-viewer');
   const viewport = $('#document-viewport');
   const pagesNode = $('#document-pages');
@@ -139,6 +146,7 @@
       'not_configured', 'invalid_configuration', 'blocked_mutation',
       'upstream_timeout', 'upstream_auth_error', 'upstream_rate_limited',
       'upstream_server_error', 'invalid_response', 'agent_transport_error',
+      'upstream_insufficient_balance', 'upstream_request_error', 'upstream_response_truncated',
     ]);
     const model = String(value.model ?? '').trim().slice(0, 160);
     const fallbackReason = String(value.fallbackReason ?? '').trim();
@@ -196,21 +204,7 @@
   function normalizeStoredHistory(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
     const entries = Object.entries(value).slice(-40).map(([questionId, messages]) => {
-      const cleanMessages = Array.isArray(messages) ? messages.slice(-12).map((message) => {
-        const clean = {
-          role: message?.role === 'assistant' ? 'assistant' : 'user',
-          content: String(message?.content || '').slice(0, 2500),
-        };
-        if (clean.role === 'assistant') {
-          const citations = normalizeAiCitations(message?.citations);
-          const agent = normalizeAiAgent(message?.agent);
-          const generation = normalizeAiGeneration(message?.generation);
-          if (citations.length) clean.citations = citations;
-          if (agent) clean.agent = agent;
-          if (generation) clean.generation = generation;
-        }
-        return clean;
-      }).filter((message) => message.content) : [];
+      const cleanMessages = normalizeStoredThread(messages);
       return [String(questionId), cleanMessages];
     });
     return Object.fromEntries(entries);
@@ -230,6 +224,8 @@
       if (role === 'assistant') {
         const generation = normalizeAiGeneration(message?.generation);
         const citations = normalizeAiCitations(message?.citations);
+        const agent = normalizeAiAgent(message?.agent);
+        if (agent) clean.agent = agent;
         if (generation) clean.generation = generation;
         if (citations.length) clean.citations = citations;
         if (message?.sourceBadge === 'official') clean.sourceBadge = 'official';
@@ -315,17 +311,12 @@
   let expandedQuestionId = '';
   let aiPanelQuestionId = '';
   let assistantRequestId = 0;
-  // Mirrors server/platform.py: MAX_ASSISTANT_HISTORY=12, per-message content
-  // cap 4000, storage threads capped separately so long replies stay readable.
-  const HISTORY_SEND_MAX = 12;
-  const HISTORY_CONTENT_MAX = 4000;
-  const THREAD_STORE_MAX = 24;
-  const SELECTED_TEXT_MAX = 8000;
   let aiScope = 'question';
   let aiSelectionText = '';
   let aiChatBusy = false;
   let aiCompositionActive = false;
-  let aiLastFailure = null;
+  let aiActiveRequest = null;
+  const aiFailures = new Map();
   let aiPointerDownInsidePanel = false;
   const assistantPendingQuestions = new Set();
   const aiQuestionDrafts = new Map();
@@ -569,13 +560,13 @@
     wordLookup.open(target, value);
   }
 
-  function save() {
+  function save(immediate = false) {
     const indicator = $('#save-indicator');
     indicator?.classList.remove('is-error');
     indicator?.classList.add('is-saving');
     if (indicator) indicator.lastChild.textContent = ' 保存中';
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => {
+    const persist = () => {
       try {
         localStorage.setItem(storageKey, JSON.stringify({
           tool: state.tool,
@@ -604,8 +595,12 @@
         if (indicator) indicator.lastChild.textContent = ' 保存失败';
         showToast('本地存储空间不足，当前标注未能保存');
       }
-    }, 180);
+    };
+    if (immediate) persist();
+    else saveTimer = setTimeout(persist, 180);
   }
+
+  window.addEventListener('pagehide', () => save(true));
 
   function pushHistory(action) {
     state.history.push(action);
@@ -1303,7 +1298,8 @@
         const hadHistory = Object.values(state.aiHistory).some((messages) => Array.isArray(messages) && messages.length);
         state.aiHistory = {};
         state.aiHistoryRevision = questionDataRevision;
-        aiQuestionDrafts.clear();
+        [...aiQuestionDrafts.keys()].filter((key) => key.startsWith('question:')).forEach((key) => aiQuestionDrafts.delete(key));
+        [...aiFailures.keys()].filter((key) => key.startsWith('question:')).forEach((key) => aiFailures.delete(key));
         save();
         if (hadHistory) showToast('解析复核版本已更新，旧版本的 AI 对话已清除');
       }
@@ -1450,16 +1446,19 @@
   };
 
   function extractReplyText(content) {
-    const raw = String(content ?? '');
-    const trimmed = raw.trim();
-    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return raw;
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (parsed && typeof parsed === 'object' && typeof parsed.reply === 'string' && parsed.reply.trim()) {
-        return parsed.reply.trim();
-      }
-    } catch { /* plain text content is fine */ }
-    return raw;
+    if (typeof content !== 'string') return '';
+    let text = content.trim();
+    for (let depth = 0; depth < 3; depth += 1) {
+      const fenced = /^```(?:json)?\s*\n?([\s\S]*?)\n?```$/i.exec(text);
+      const candidate = (fenced ? fenced[1] : text).trim();
+      if (!/^[{\[]/.test(candidate) && !/^```json\b/i.test(text)) return text;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!parsed || Array.isArray(parsed) || typeof parsed.reply !== 'string') return '';
+        text = parsed.reply.trim();
+      } catch { return ''; }
+    }
+    return '';
   }
 
   function appendInlineMarkdown(parent, text) {
@@ -1618,7 +1617,49 @@
     return state.aiHistory[questionId];
   }
 
-  function renderAiConversation(pending = false) {
+  function aiThreadKey(scope = aiScope, questionId = aiPanelQuestionId || state.currentQuestionId) {
+    return scope === 'question' ? `question:${questionId}` : scope;
+  }
+
+  function rememberAiDraft() {
+    const input = $('#ai-question-input');
+    if (input) aiQuestionDrafts.set(aiThreadKey(), input.value.slice(0, 2000));
+  }
+
+  function restoreAiDraft() {
+    const input = $('#ai-question-input');
+    if (input) input.value = aiQuestionDrafts.get(aiThreadKey()) || '';
+  }
+
+  function refreshAiRequestUi() {
+    const key = aiThreadKey();
+    const failure = aiFailures.get(key);
+    const retry = $('#ai-retry-last');
+    if (retry) {
+      retry.hidden = !failure?.retryable;
+      retry.disabled = aiChatBusy;
+    }
+    const status = $('#ai-chat-status');
+    if (status) {
+      status.hidden = !failure && !aiChatBusy;
+      status.classList.toggle('is-error', Boolean(failure) && !aiChatBusy);
+      status.textContent = aiChatBusy
+        ? (aiActiveRequest?.key === key
+          ? '正在整理回答，请稍候。你可以继续编辑下一条问题。'
+          : '其他会话的问题正在回复，完成后可返回对应会话查看。')
+        : failure?.notice || '';
+    }
+    const sendButton = $('#ai-send-button');
+    if (sendButton) {
+      sendButton.disabled = aiChatBusy;
+      sendButton.textContent = aiChatBusy ? '正在回复…' : '发送问题';
+    }
+    const newChat = $('#ai-new-chat');
+    if (newChat) newChat.disabled = aiChatBusy;
+    aiQuestionPanel?.setAttribute('aria-busy', String(aiChatBusy));
+  }
+
+  function renderAiConversation() {
     if (!aiQuestionMessages) return;
     aiQuestionMessages.replaceChildren();
     const history = activeAiThread();
@@ -1640,14 +1681,15 @@
         }
         const bodyWrapper = document.createElement('div');
         bodyWrapper.className = 'ai-md-body';
-        bodyWrapper.append(renderAssistantMarkdown(extractReplyText(message.content)));
+        const readableReply = extractReplyText(message.content);
+        bodyWrapper.append(renderAssistantMarkdown(readableReply || '这条历史回复的格式异常，请重新提问。'));
         container.append(bodyWrapper);
         appendAssistantMetadata(container, { ...message, role: 'assistant' });
         const copyButton = makeElement('button', 'ai-copy-message-button', '复制');
         copyButton.type = 'button';
         copyButton.setAttribute('aria-label', `复制第 ${index + 1} 条 AI 回复`);
         copyButton.addEventListener('click', async () => {
-          const copied = await copyTextWithFallback(extractReplyText(message.content));
+          const copied = readableReply && await copyTextWithFallback(readableReply);
           showToast(copied ? '已复制该条回复' : '浏览器未授权复制');
         });
         container.append(copyButton);
@@ -1656,7 +1698,10 @@
       }
       aiQuestionMessages.append(container);
     });
-    if (pending) aiQuestionMessages.append(makeElement('p', 'ai-question-message is-pending', '正在结合上下文整理回答…'));
+    if (aiChatBusy && aiActiveRequest?.key === aiThreadKey()) {
+      aiQuestionMessages.append(makeElement('p', 'ai-question-message is-pending', '正在结合上下文整理回答…'));
+    }
+    refreshAiRequestUi();
     aiQuestionMessages.scrollTop = aiQuestionMessages.scrollHeight;
   }
 
@@ -1669,15 +1714,7 @@
     if (aiChatBusy) return;
     clearTimeout(aiSelectionRefreshTimer);
     aiSelectionRefreshTimer = setTimeout(() => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
-      const anchorNode = selection.anchorNode;
-      if (!anchorNode || !pagesNode?.contains(anchorNode.nodeType === Node.TEXT_NODE ? anchorNode.parentNode : anchorNode)) return;
-      const captured = capturePdfSelectionText();
-      if (captured && captured !== aiSelectionText) {
-        aiSelectionText = captured;
-        if (aiScope === 'selection') refreshAiScopeUi(false);
-      }
+      rememberPdfSelection();
     }, 250);
   });
 
@@ -1702,6 +1739,7 @@
       const button = makeElement('button', 'ai-quick-prompt', promptText);
       button.type = 'button';
       button.title = `快捷提问：${promptText}`;
+      button.disabled = aiChatBusy;
       button.addEventListener('click', () => {
         if (aiChatBusy) return;
         const input = $('#ai-question-input');
@@ -1716,8 +1754,25 @@
   function capturePdfSelectionText() {
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return '';
+    const range = selection.getRangeAt(0);
+    const isPdfText = (node) => {
+      const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+      const layer = element?.closest?.('.page-text-layer');
+      return Boolean(layer && pagesNode?.contains(layer));
+    };
+    // Both ends must belong to PDF text: selecting a sidebar or crossing from
+    // the exam into the chat must never silently replace the quoted passage.
+    if (!isPdfText(range.startContainer) || !isPdfText(range.endContainer)) return '';
     const text = selection.toString().replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
-    return text.slice(0, 8000);
+    return text.slice(0, SELECTED_TEXT_MAX);
+  }
+
+  function rememberPdfSelection() {
+    if (aiChatBusy) return;
+    const captured = capturePdfSelectionText();
+    if (!captured || captured === aiSelectionText) return;
+    aiSelectionText = captured;
+    refreshAiScopeUi(false);
   }
 
   function setAiScope(scope, { silent = false, rerender = true } = {}) {
@@ -1737,7 +1792,9 @@
         return;
       }
     }
+    if (scope !== aiScope) rememberAiDraft();
     aiScope = scope;
+    restoreAiDraft();
     refreshAiScopeUi(rerender);
     if (!silent) {
       const labels = { general: '已切换到自由提问', question: '已切换到当前题目模式', selection: `已引用选中的 ${aiSelectionText.length} 字` };
@@ -1750,6 +1807,9 @@
       const active = button.dataset.aiScope === aiScope;
       button.setAttribute('aria-selected', String(active));
       button.classList.toggle('is-active', active);
+      button.disabled = aiChatBusy
+        || (button.dataset.aiScope === 'selection' && !aiSelectionText)
+        || (button.dataset.aiScope === 'question' && !questions.length);
     });
     const title = $('#ai-question-title');
     const context = $('#ai-question-context');
@@ -1774,37 +1834,30 @@
         question: '针对当前题提问（Enter 发送，Shift+Enter 换行）',
       }[aiScope];
     }
+    const excerpt = $('#ai-selection-excerpt');
+    if (excerpt) {
+      excerpt.hidden = !aiSelectionText;
+      excerpt.textContent = aiSelectionText.length > 240 ? `${aiSelectionText.slice(0, 240)}…` : aiSelectionText;
+      excerpt.setAttribute('aria-label', `已引用的试卷文字，共 ${aiSelectionText.length} 个字符`);
+    }
+    refreshAiRequestUi();
     renderQuickPrompts();
     if (rerender) renderAiConversation();
   }
 
   function syncAiQuestionContext(questionId = state.currentQuestionId) {
     const question = questions.find((item) => item.id === questionId) || currentQuestion();
-    const formButton = $('#ai-question-form button');
-    const input = $('#ai-question-input');
     const previousQuestionId = aiPanelQuestionId;
-    if (input && previousQuestionId && previousQuestionId !== question?.id) {
-      aiQuestionDrafts.set(previousQuestionId, input.value.slice(0, 2000));
-    }
+    if (aiScope === 'question' && previousQuestionId !== question?.id) rememberAiDraft();
     if (!question) {
       aiPanelQuestionId = '';
       if (aiScope === 'question') setAiScope('general', { silent: true, rerender: false });
       refreshAiScopeUi();
-      renderAiConversation();
-      if (formButton) formButton.disabled = aiChatBusy;
       return;
     }
     aiPanelQuestionId = question.id;
-    if (input && previousQuestionId !== question.id) input.value = aiQuestionDrafts.get(question.id) || '';
-    if (aiScope === 'question') {
-      $('#ai-question-title').textContent = `本题 AI 助手 · ${questionLabel(question)}`;
-      $('#ai-question-context').textContent = question.stem || questionLabel(question);
-      $('#ai-input-label') && ($('#ai-input-label').textContent = '针对当前题提问（Enter 发送，Shift+Enter 换行）');
-    }
-    const pending = assistantPendingQuestions.has(question.id);
-    if (formButton) formButton.disabled = pending;
-    renderAiQuestionMessages(question.id, pending);
-    if (aiScope === 'question') renderQuickPrompts();
+    if (aiScope === 'question' && previousQuestionId !== question.id) restoreAiDraft();
+    refreshAiScopeUi();
   }
 
   function openAiQuestionPanel(questionId = state.currentQuestionId) {
@@ -1829,8 +1882,7 @@
   }
 
   function closeAiQuestionPanel() {
-    const input = $('#ai-question-input');
-    if (input && aiPanelQuestionId) aiQuestionDrafts.set(aiPanelQuestionId, input.value.slice(0, 2000));
+    rememberAiDraft();
     aiQuestionPanel?.classList.remove('is-visible');
     aiQuestionPanel?.classList.remove('is-minimized');
     aiQuestionPanel?.setAttribute('aria-hidden', 'true');
@@ -1861,6 +1913,51 @@
     }));
   }
 
+  function encodeAiRequest(body) {
+    let encoded = JSON.stringify(body);
+    const encoder = new TextEncoder();
+    while (encoder.encode(encoded).byteLength > AI_REQUEST_MAX_BYTES && body.history.length) {
+      body.history.shift();
+      // Drop the orphaned answer along with its question when trimming a turn.
+      if (body.history[0]?.role === 'assistant') body.history.shift();
+      encoded = JSON.stringify(body);
+    }
+    if (encoder.encode(encoded).byteLength > AI_REQUEST_MAX_BYTES) {
+      throw Object.assign(new Error('当前问题和选文合计过长，请缩短后再发送。'), { httpStatus: 413 });
+    }
+    return encoded;
+  }
+
+  function aiFailureNotice(error) {
+    const reasons = {
+      not_configured: '尚未配置 AI 服务，请完成服务器的 API 配置后重试。',
+      invalid_configuration: 'AI 服务配置有误，请检查服务器的模型和连接设置后重试。',
+      upstream_auth_error: 'AI 服务认证失败，请检查 API Key 后重试。',
+      upstream_insufficient_balance: 'AI 服务账户余额不足，请处理账户状态后重试。',
+      upstream_rate_limited: 'AI 服务请求过于频繁，请稍候重试。',
+      upstream_timeout: 'AI 回复超时，请稍候重试；你的问题已保留。',
+      upstream_server_error: 'AI 服务暂时不可用，请稍候重试。',
+      upstream_request_error: 'AI 服务未能接受请求，请检查模型设置或调整问题后重试。',
+      upstream_response_truncated: 'AI 回复未能完整生成，请重试或让回答更简短。',
+      invalid_response: 'AI 返回的格式异常，请重试；你的问题已保留。',
+      agent_transport_error: 'AI 助手连接暂时中断，请稍候重试。',
+    };
+    if (error?.revisionChanged) return '试卷解析已更新，请重新查看本题后再提问。';
+    if (error instanceof TypeError) return '无法连接本地服务，请确认服务器正在运行后重试。';
+    if (reasons[error?.fallbackReason]) return reasons[error.fallbackReason];
+    const status = error?.httpStatus;
+    const prefix = status === 400 ? '请求内容未通过校验'
+      : status === 413 ? '发送内容过长，请缩短问题或选文'
+      : status === 401 || status === 403 ? 'AI 服务认证失败'
+      : status === 429 ? '请求过于频繁，请稍候重试'
+      : status === 502 || status === 503 ? 'AI 服务暂时不可用'
+      : status === 504 ? 'AI 回复超时'
+      : '发送失败，请重试';
+    const detail = typeof error?.serverDetail === 'string' ? error.serverDetail.trim() : '';
+    // Server HTML/JSON and stack traces are never user-facing error content.
+    return detail && !/[{}<>\n]/.test(detail) ? `${prefix}：${detail.slice(0, 120)}` : `${prefix}。你的问题已保留。`;
+  }
+
   function aiSourceBadgeFromResponse(data) {
     const grounding = data?.grounding;
     if (data?.scope && data.scope !== 'question') return null;
@@ -1869,52 +1966,61 @@
     return null;
   }
 
-  async function sendAiQuestion(message) {
-    const question = questions.find((item) => item.id === aiPanelQuestionId);
+  async function sendAiQuestion(message, retryContext = null) {
+    const requestScope = retryContext?.scope || aiScope;
+    const requestQuestionId = requestScope === 'question' ? (retryContext?.questionId || aiPanelQuestionId) : '';
+    const selectedText = requestScope === 'selection' ? (retryContext?.selectedText ?? aiSelectionText).slice(0, SELECTED_TEXT_MAX) : '';
+    const question = questions.find((item) => item.id === requestQuestionId);
     const cleanMessage = String(message || '').trim().slice(0, 2000);
-    if (!cleanMessage || aiChatBusy) return;
-    if (aiScope === 'question') {
+    if (!cleanMessage || aiChatBusy || !paperConfig.assistantUrl) return;
+    if (requestScope === 'question') {
       if (!question || !paperConfig.assistantUrl || assistantPendingQuestions.has(question.id)) return;
     }
-    if (aiScope === 'selection' && !aiSelectionText.trim()) {
+    if (requestScope === 'selection' && !selectedText.trim()) {
       showToast('请先在试卷上选中一段文字');
-      setAiScope('general', { silent: true });
       return;
     }
 
-    const requestScope = aiScope;
-    const requestQuestionId = requestScope === 'question' ? question.id : '';
     const targetThread = threadForScope(requestScope, requestQuestionId);
+    const key = aiThreadKey(requestScope, requestQuestionId);
     const requestIdBase = ++assistantRequestId;
-    targetThread.push({ role: 'user', content: cleanMessage });
+    const requestContext = {
+      key, scope: requestScope, questionId: requestQuestionId, selectedText, message: cleanMessage,
+    };
+    rememberAiDraft();
+    const inputAtSend = aiQuestionDrafts.get(key) || '';
+    const history = aiHistoryForRequest(targetThread);
+    const userTurn = { role: 'user', content: cleanMessage };
+    targetThread.push(userTurn);
     if (targetThread.length > THREAD_STORE_MAX) targetThread.splice(0, targetThread.length - THREAD_STORE_MAX);
-    aiLastFailure = null;
-    $('#ai-retry-last').hidden = true;
+    aiFailures.delete(key);
+    aiActiveRequest = requestContext;
     aiChatBusy = true;
-    const sendButton = $('#ai-send-button');
-    if (sendButton) sendButton.disabled = true;
-    $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => { button.disabled = true; });
-    renderAiConversation(true);
+    if (requestQuestionId) assistantPendingQuestions.add(requestQuestionId);
+    refreshAiScopeUi();
     save();
 
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
     try {
       let body;
       if (requestScope === 'question') {
-        body = { scope: 'question', questionId: question.id, message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'question', questionId: question.id, message: cleanMessage, history, requestId: `reader-${requestIdBase}` };
         const requestRevision = questionDataRevision;
         if (Number.isInteger(requestRevision) && requestRevision >= 0) body.reviewRevision = requestRevision;
         const userAnswer = String(state.answers[question.id] || '').trim();
         if (userAnswer) body.userAnswer = userAnswer.slice(0, 100);
       } else if (requestScope === 'selection') {
-        body = { scope: 'selection', selectedText: aiSelectionText.slice(0, SELECTED_TEXT_MAX), message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'selection', selectedText, message: cleanMessage, history, requestId: `reader-${requestIdBase}` };
       } else {
-        body = { scope: 'general', message: cleanMessage, history: aiHistoryForRequest(targetThread).slice(0, -1), requestId: `reader-${requestIdBase}` };
+        body = { scope: 'general', message: cleanMessage, history, requestId: `reader-${requestIdBase}` };
       }
 
       const response = await fetch(paperConfig.assistantUrl, {
         method: 'POST',
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: JSON.stringify(body),
+        body: encodeAiRequest(body),
       });
       let data = null;
       data = await response.json().catch(() => null);
@@ -1922,11 +2028,15 @@
         throw Object.assign(new Error('review revision changed'), { revisionChanged: true });
       }
       if (!response.ok) {
-        const detail = String(data?.error || '').trim();
+        const detail = typeof data?.error === 'string' ? data.error.trim() : '';
         throw Object.assign(
           new Error(detail || `assistant request failed: ${response.status}`),
-          { httpStatus: response.status },
+          { httpStatus: response.status, serverDetail: detail },
         );
+      }
+      if ((data?.scope && data.scope !== requestScope)
+        || (requestScope === 'question' && data?.questionId && data.questionId !== requestQuestionId)) {
+        throw Object.assign(new Error('assistant context mismatch'), { fallbackReason: 'invalid_response' });
       }
       const expectedRevision = Number.isInteger(body.reviewRevision) ? body.reviewRevision : null;
       if (
@@ -1942,8 +2052,14 @@
       if (requestScope === 'question' && expectedRevision !== null && expectedRevision !== questionDataRevision) {
         throw Object.assign(new Error('stale request'), { revisionChanged: true, staleRequest: true });
       }
-      let reply = String(data?.reply ?? '').trim();
-      if (!reply) throw new Error('empty assistant reply');
+      const generation = normalizeAiGeneration(data?.generation);
+      // Free-form deterministic fallbacks are service notices, not answers to
+      // the user's question. Grounded question fallbacks remain useful replies.
+      if (requestScope !== 'question' && generation && !generation.used) {
+        throw Object.assign(new Error('model unavailable'), { fallbackReason: generation.fallbackReason || 'invalid_response' });
+      }
+      let reply = extractReplyText(data?.reply);
+      if (!reply) throw Object.assign(new Error('invalid assistant reply'), { fallbackReason: 'invalid_response' });
       const disclaimer = String(data?.grounding?.disclaimer || '').trim();
       if (disclaimer && !reply.includes(disclaimer)) reply = `${disclaimer}\n\n${reply}`;
       const assistantMessage = { role: 'assistant', content: reply.slice(0, 8000), requestId: requestIdBase };
@@ -1951,44 +2067,40 @@
       if (badge) assistantMessage.sourceBadge = badge;
       const citations = normalizeAiCitations(data?.citations ?? data?.grounding?.citations);
       const agent = normalizeAiAgent(data?.agent);
-      const generation = normalizeAiGeneration(data?.generation);
       if (citations.length) assistantMessage.citations = citations;
       if (agent) assistantMessage.agent = agent;
       if (generation) assistantMessage.generation = generation;
       targetThread.push(assistantMessage);
       if (targetThread.length > THREAD_STORE_MAX) targetThread.splice(0, targetThread.length - THREAD_STORE_MAX);
+      const input = $('#ai-question-input');
+      const activeRequestThread = aiThreadKey() === key;
+      const currentDraft = activeRequestThread && input ? input.value : aiQuestionDrafts.get(key);
+      // Clear only the submitted draft, preserving edits and other questions.
+      if (currentDraft === inputAtSend && String(currentDraft || '').trim() === cleanMessage) {
+        aiQuestionDrafts.delete(key);
+        if (activeRequestThread && input) input.value = '';
+      }
+      $('.ai-server-banner', aiQuestionPanel)?.remove();
     } catch (error) {
+      if (error?.name === 'AbortError') error.fallbackReason = 'upstream_timeout';
       // Roll the unanswered user turn back out of the thread so a retry never
       // duplicates it, and give the input back to the user.
-      const lastMessage = targetThread[targetThread.length - 1];
-      if (lastMessage?.role === 'user' && lastMessage.content === cleanMessage) targetThread.pop();
-      const input = $('#ai-question-input');
-      if (input && !input.value.trim()) input.value = cleanMessage;
+      const turnIndex = targetThread.indexOf(userTurn);
+      if (turnIndex >= 0) targetThread.splice(turnIndex, 1);
+      aiFailures.set(key, { ...requestContext, notice: aiFailureNotice(error), retryable: !error?.revisionChanged });
       if (error?.revisionChanged) {
         loadQuestionData();
         showToast('试卷解析已更新，请重新查看本题后再提问');
       } else if (error instanceof TypeError) {
         aiShowServerBanner();
-        showToast('无法连接本地服务，请确认服务器正在运行');
-      } else {
-        aiLastFailure = { scope: requestScope, questionId: requestQuestionId, message: cleanMessage };
-        $('#ai-retry-last').hidden = false;
-        const status = error?.httpStatus;
-        const reason = error?.message || '未知错误';
-        const prefix = status === 400 ? '请求被拒绝'
-          : status === 413 ? '内容过长'
-          : status === 502 || status === 503 ? 'AI 服务暂不可用'
-          : status === 504 ? 'AI 请求超时'
-          : '发送失败';
-        showToast(`${prefix}：${reason.slice(0, 80)}`);
       }
       console.warn('AI chat request failed:', error);
     } finally {
+      clearTimeout(timeout);
       aiChatBusy = false;
-      if (sendButton) sendButton.disabled = false;
-      $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => { button.disabled = false; });
-      refreshAiScopeUi(false);
-      renderAiConversation(false);
+      aiActiveRequest = null;
+      if (requestQuestionId) assistantPendingQuestions.delete(requestQuestionId);
+      refreshAiScopeUi();
       save();
     }
   }
@@ -2260,6 +2372,9 @@
   }
 
   function captureTextSelection() {
+    // Annotation/copy actions below clear the browser Range. Retain the AI
+    // passage first, including fast drags that beat selectionchange debounce.
+    rememberPdfSelection();
     if (!['select', 'copy', 'highlight'].includes(state.tool) || tagEditor?.contains(document.activeElement) || $('#selection-copy-panel')?.contains(document.activeElement)) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
@@ -2579,12 +2694,14 @@
     if (button) jumpToPage(button.dataset.thumbnailPage, true);
   });
   document.addEventListener('pointerdown', (event) => {
+    rememberPdfSelection();
     selectionPointerActive = true;
     aiPointerDownInsidePanel = Boolean(event.target?.closest?.('#ai-question-panel'));
-  }, { passive: true });
+  }, { passive: true, capture: true });
   document.addEventListener('pointerup', () => {
     selectionPointerActive = false;
     if (aiPointerDownInsidePanel) return;
+    rememberPdfSelection();
     setTimeout(captureTextSelection, 0);
   });
   document.addEventListener('pointercancel', () => { selectionPointerActive = false; });
@@ -2742,22 +2859,16 @@
       showToast('先输入问题再发送');
       return;
     }
-    if (input) input.value = '';
-    if (aiScope === 'question' && aiPanelQuestionId) aiQuestionDrafts.delete(aiPanelQuestionId);
     sendAiQuestion(message);
   });
-  $('#ai-question-input')?.addEventListener('input', (event) => {
-    if (aiScope === 'question' && aiPanelQuestionId) {
-      aiQuestionDrafts.set(aiPanelQuestionId, event.currentTarget.value.slice(0, 2000));
-    }
-  });
+  $('#ai-question-input')?.addEventListener('input', rememberAiDraft);
   $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => {
     button.addEventListener('click', () => setAiScope(button.dataset.aiScope));
   });
   $('#ai-new-chat')?.addEventListener('click', () => {
+    if (aiChatBusy) return;
     activeAiThread().splice(0);
-    aiLastFailure = null;
-    $('#ai-retry-last').hidden = true;
+    aiFailures.delete(aiThreadKey());
     renderAiConversation();
     save();
     showToast('已开始新的对话（其他题目与模式的历史不受影响）');
@@ -2766,7 +2877,8 @@
     const thread = activeAiThread();
     for (let index = thread.length - 1; index >= 0; index -= 1) {
       if (thread[index].role === 'assistant') {
-        const copied = await copyTextWithFallback(extractReplyText(thread[index].content));
+        const reply = extractReplyText(thread[index].content);
+        const copied = reply && await copyTextWithFallback(reply);
         showToast(copied ? '已复制最近一条 AI 回复' : '浏览器未授权复制');
         return;
       }
@@ -2774,11 +2886,11 @@
     showToast('当前对话还没有 AI 回复');
   });
   $('#ai-retry-last')?.addEventListener('click', () => {
-    if (!aiLastFailure || aiChatBusy) return;
-    setAiScope(aiLastFailure.scope, { silent: true });
-    if (aiLastFailure.questionId) syncAiQuestionContext(aiLastFailure.questionId);
-    renderAiConversation();
-    sendAiQuestion(aiLastFailure.message);
+    const failure = aiFailures.get(aiThreadKey());
+    if (!failure?.retryable || aiChatBusy) return;
+    if (failure.scope === 'selection') aiSelectionText = failure.selectedText;
+    refreshAiScopeUi(false);
+    sendAiQuestion(failure.message, failure);
   });
   $('#tag-record-list')?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-record-tag-id]');

@@ -544,3 +544,8 @@ svg { width: 1.15em; height: 1.15em; fill: none; stroke: currentColor; stroke-wi
 .ai-server-banner p { margin: 4px 0 0; color: #7a5a52; font-size: 10px; }
 .ai-server-banner code { padding: 1px 5px; border-radius: 4px; background: #fff; font-size: 10px; color: #8a3b2a; }
 .ai-scope-switcher [data-ai-scope]:disabled { opacity: .55; cursor: not-allowed; }
+.ai-text-button:disabled, .ai-quick-prompt:disabled { opacity: .55; cursor: not-allowed; }
+.ai-selection-excerpt { flex-shrink: 0; margin: 8px 14px 0; padding: 7px 10px; max-height: 70px; overflow: auto; border-left: 3px solid #4a93b4; background: #eef5f8; color: #456575; font-size: 11px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-chat-status { flex-shrink: 0; margin: 5px 14px; padding: 8px 10px; border-radius: 7px; background: #edf5f9; color: #416c82; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.ai-chat-status.is-error { border: 1px solid #e5c1a7; background: #fff5ec; color: #8a542b; }
+.ai-question-message { overflow-wrap: anywhere; }

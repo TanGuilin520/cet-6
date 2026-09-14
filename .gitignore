@@ -38,6 +38,8 @@ data/agent/
 .idea/
 .vscode/
 node_modules/
+test-results/
+playwright-report/
 
 # Local Codex helper experiments are not part of the CET application.
 tools/codex-instruct-*.py

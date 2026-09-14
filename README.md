@@ -90,7 +90,6 @@
 
 ```bash
 python3.11 -m venv .venv-main
-.venv-main/bin/python -m pip install -r services/agent/requirements.txt  # 仅 CI/E2E 需要
 ```
 
 以下文档命令统一假设使用 `.venv-main/bin/python`（或 Docker）运行主服务。
@@ -105,8 +104,18 @@ python3.11 -m venv .venv-main
 在项目根目录执行（需要 Python 3.11；系统解释器过低时主服务会拒绝启动并给出提示）：
 
 ```bash
-.venv-main/bin/python -m server
+bash tools/start.sh
 ```
+
+启动脚本使用项目的 `.venv-main`，并隔离可能来自 ROS 等环境的 `PYTHONPATH`。保持这个终端运行；关闭服务后，已经打开的网页仍可能显示，但无法请求 AI。
+
+不启动服务也可以检查解释器、密钥配置来源和 Agent 配置：
+
+```bash
+bash tools/start.sh --check
+```
+
+该检查不会调用 DeepSeek，不会输出密钥，也不代表凭证或余额已通过验证。
 
 然后打开：
 
@@ -150,6 +159,12 @@ DEEPSEEK_MODEL=deepseek-v4-flash
 ```
 
 密钥只由 Python 服务读取；网页源码、浏览器请求头和 `localStorage` 中不保存密钥。`.env` 已被 `.gitignore` 忽略。
+
+环境变量优先于 `.env`，包括显式设置为空的变量。如果 `--check` 显示 `deepseekKeySource=environment`，但你希望使用项目 `.env` 的密钥，可仅对本次启动移除继承值：
+
+```bash
+env -u DEEPSEEK_API_KEY bash tools/start.sh
+```
 
 也可以使用环境变量：
 
@@ -305,7 +320,7 @@ CET_AGENT_TIMEOUT_SECONDS=40
 需要本机安装 Poppler 的 `pdftotext` 和 `pdftoppm`，然后执行：
 
 ```bash
-python3 tools/build_exam_assets.py \
+.venv-main/bin/python tools/build_exam_assets.py \
   "data/reference/2021-06/papers/2021.06四级真题第1套.pdf" \
   "public/assets/papers/2021-06-set-01" \
   --id "2021-06-01" \
@@ -327,10 +342,22 @@ node --check public/js/home.js
 node --check public/js/upload.js
 node --check public/js/review.js
 node --check public/js/reader.js
-python3 -m py_compile server/app.py server/platform.py server/agent_client.py server/paddle_ocr.py server/__main__.py services/agent/app.py services/paddleocr/app.py tools/build_exam_assets.py
-python3 -m unittest discover -s tests -v
-python3 tools/run_agent_evals.py --validate-only
+.venv-main/bin/python -m py_compile server/app.py server/platform.py server/agent_client.py server/paddle_ocr.py server/__main__.py services/agent/app.py services/paddleocr/app.py tools/build_exam_assets.py
+DEEPSEEK_API_KEY= .venv-agent/bin/python -m unittest discover -s tests -v
+.venv-agent/bin/python tools/run_agent_evals.py --validate-only
 ```
+
+自动化测试使用独立的 `.venv-agent`（安装步骤见 Agent 配置章节），以覆盖真实 LangGraph 图的编译和调用。`--validate-only` 只校验评测案例格式，并不是检索准确率或模型回答质量评测。
+
+浏览器回归使用 Node.js 和 Playwright；它们只用于开发测试，运行阅读器不需要前端构建：
+
+```bash
+npm ci
+npx playwright install chromium
+npm run test:browser
+```
+
+浏览器测试启动隔离的本地服务并使用合成回复，覆盖聊天刷新恢复、Enter/中文输入法、连续追问、选段提问、失败重试和安全渲染。测试不调用真实 DeepSeek；在 CI 中也会执行。失败时可查看 `playwright-report/` 和 `test-results/`，这些目录不进入 Git。
 
 修改页面结构或工具栏后，建议在桌面和手机宽度各打开一次完整卷，回归检查 8 页加载、题号轨道展开与不遮卷、选段复制及权限降级、不同颜色荧光刷新恢复、直线、标签、橡皮擦、撤回、AI 开窗切题与写作模板导入/预览/覆盖保护；单篇练习功能在 `practice.html` 单独检查。
 

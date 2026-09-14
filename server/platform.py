@@ -71,8 +71,28 @@ MAX_TITLE_CHARS = 160
 MAX_ASSISTANT_BYTES = 48 * 1024
 MAX_ASSISTANT_MESSAGE_CHARS = 8_000
 MAX_ASSISTANT_HISTORY = 12
+MAX_ASSISTANT_HISTORY_CHARS = 4_000
 MAX_SELECTED_TEXT_CHARS = 8_000
 MAX_REPLY_CHARS_PLATFORM = 16_000
+ASSISTANT_REPLY_CONTRACT = (
+    '\n只输出一个合法 JSON 对象，顶层只允许一个字段：{"reply": "面向用户的 Markdown 文本"}。'
+    "reply 必须是普通用户可读的简体中文 Markdown：先直接回答问题，再按需要使用简短标题、"
+    "自然段、有序或无序列表；英语例句保留英文并可使用引用块。"
+    "reply 中不得包含序列化的 JSON 对象、questionId、officialFound、trace、generation、"
+    "schemaVersion 等内部字段，不得输出隐藏思维链，不得把 JSON 信封包进代码块。"
+)
+ASSISTANT_FAILURE_LABELS = {
+    "upstream_auth_error": "AI 服务凭证未通过验证",
+    "upstream_insufficient_balance": "AI 服务账户余额不足",
+    "upstream_rate_limited": "AI 服务请求过于频繁",
+    "upstream_request_error": "AI 服务拒绝了请求参数",
+    "upstream_server_error": "AI 服务暂不可用",
+    "upstream_timeout": "AI 请求超时",
+    "upstream_response_truncated": "AI 回复过长，未能完整生成",
+    "invalid_response": "AI 回复格式异常",
+    "not_configured": "尚未配置 AI 服务",
+    "invalid_configuration": "AI 服务配置无效",
+}
 MAX_REVIEW_BYTES = 256 * 1024
 MAX_REVIEW_OPERATIONS = 100
 MAX_REVIEW_REASON_CHARS = 500
@@ -1940,7 +1960,6 @@ class PlatformService:
         EXAMS_DIR.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="exam-parser")
-        self._recover_interrupted_jobs()
 
     def _recover_interrupted_jobs(self) -> None:
         for status_path in EXAMS_DIR.glob("exam-*/status.json"):
@@ -3282,7 +3301,6 @@ class PlatformService:
         message = payload.get("message")
         history = payload.get("history", [])
         selected_text = payload.get("selectedText")
-        expected_revision = payload.get("reviewRevision")
 
         if not isinstance(message, str) or not message.strip() or len(message.strip()) > MAX_ASSISTANT_MESSAGE_CHARS:
             raise PlatformError(f"message must contain 1 to {MAX_ASSISTANT_MESSAGE_CHARS} characters")
@@ -3328,29 +3346,23 @@ class PlatformService:
                 "先直接回答问题，再补充解释；使用简短标题、自然段和列表；英语例句保留英文。"
             )
             user_content = message.strip()
-        system += (
-            "\n只输出一个合法 JSON 对象，顶层只允许一个字段：{\"reply\": \"面向用户的 Markdown 文本\"}。"
-            "reply 中禁止出现 questionId、trace、generation 等内部字段名，不得把 JSON 包进代码块。"
-        )
-
         outcome = self._direct_deepseek_chat(system, clean_history + [{"role": "user", "content": user_content[:28_000]}])
         reply = str(outcome["reply"] or "")
         if not reply:
-            reason_labels = {
-                "upstream_auth_error": "服务端 AI 凭证未通过",
-                "upstream_rate_limited": "AI 服务限流",
-                "upstream_server_error": "AI 服务暂不可用",
-                "upstream_timeout": "AI 请求超时",
-                "invalid_response": "AI 返回无效内容",
-                "not_configured": "尚未配置 AI 服务",
-                "invalid_configuration": "AI 服务配置无效",
+            reason = str((outcome.get("generation") or {}).get("fallbackReason"))
+            label = ASSISTANT_FAILURE_LABELS.get(reason, "AI 服务暂不可用")
+            actions = {
+                "not_configured": "请联系服务维护者配置 AI 服务后重试。",
+                "invalid_configuration": "请联系服务维护者检查 AI 服务配置。",
+                "upstream_auth_error": "请联系服务维护者更新有效的 AI 服务凭证。",
+                "upstream_insufficient_balance": "请联系服务维护者检查 AI 账户余额，恢复额度后重试。",
+                "upstream_request_error": "可以尝试缩短问题；若仍然失败，请联系服务维护者检查请求配置。",
+                "upstream_response_truncated": "请把问题拆成几部分，或要求先给出简短回答，然后重试。",
             }
-            label = reason_labels.get(str((outcome.get("generation") or {}).get("fallbackReason")), "AI 服务暂不可用")
             reply = (
                 "暂时无法生成 AI 回复（" + label + "）。\n\n"
-                "- 稍后重试一次\n"
-                "- 检查服务器 .env 中 DEEPSEEK_API_KEY 是否已正确配置\n"
-                "- 题目相关的官方解析不受影响，可继续在题目模式下查看"
+                + actions.get(reason, "请稍后重试，问题内容会保留。")
+                + "\n\n题目模式下仍可查看已检索到的答案资料。"
             )
         return {
             "examId": exam_id,
@@ -3382,8 +3394,17 @@ class PlatformService:
             if not isinstance(item, dict) or set(item) != {"role", "content"}:
                 raise PlatformError(f"history[{index}] must contain only role and content")
             role, content = item.get("role"), item.get("content")
-            if role not in {"user", "assistant"} or not isinstance(content, str) or not content.strip() or len(content) > 4_000:
-                raise PlatformError(f"history[{index}] is invalid")
+            if (
+                not isinstance(role, str)
+                or role not in {"user", "assistant"}
+                or not isinstance(content, str)
+                or not content.strip()
+                or len(content) > MAX_ASSISTANT_HISTORY_CHARS
+            ):
+                raise PlatformError(
+                    f"history[{index}] must have role user or assistant and content with "
+                    f"1 to {MAX_ASSISTANT_HISTORY_CHARS} characters"
+                )
             cleaned.append({"role": role, "content": content.strip()})
         return cleaned
 
@@ -3543,14 +3564,7 @@ class PlatformService:
             if outcome["reply"]:
                 reply = str(outcome["reply"])
             else:
-                reason_labels = {
-                    "upstream_auth_error": "上游拒绝了服务端凭证",
-                    "upstream_rate_limited": "上游限流",
-                    "upstream_server_error": "上游 AI 服务暂不可用",
-                    "upstream_timeout": "上游 AI 请求超时",
-                    "invalid_response": "上游返回无效内容",
-                }
-                label = reason_labels.get(str(generation.get("fallbackReason")))
+                label = ASSISTANT_FAILURE_LABELS.get(str(generation.get("fallbackReason")))
                 if label:
                     reply += f"\n\nAI 服务暂时不可用（{label}），以上仅展示已检索到的答案资料。"
         else:
@@ -3662,7 +3676,7 @@ class PlatformService:
         request_body = json.dumps(
             {
                 "model": model,
-                "messages": [{"role": "system", "content": system}, *messages],
+                "messages": [{"role": "system", "content": system + ASSISTANT_REPLY_CONTRACT}, *messages],
                 "stream": False,
                 "temperature": 0.3,
                 "max_tokens": 1_600,
@@ -3698,26 +3712,41 @@ class PlatformService:
                 return failed("upstream_auth_error")
             if error.code == HTTPStatus.TOO_MANY_REQUESTS:
                 return failed("upstream_rate_limited")
-            return failed("upstream_server_error")
-        except (URLError, OSError):
+            if error.code == HTTPStatus.PAYMENT_REQUIRED:
+                return failed("upstream_insufficient_balance")
+            if error.code in {HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.GATEWAY_TIMEOUT}:
+                return failed("upstream_timeout")
+            if 400 <= error.code < 500:
+                return failed("upstream_request_error")
             return failed("upstream_server_error")
         except (TimeoutError, socket.timeout):
             return failed("upstream_timeout")
+        except URLError as error:
+            if isinstance(error.reason, (TimeoutError, socket.timeout)):
+                return failed("upstream_timeout")
+            return failed("upstream_server_error")
+        except OSError:
+            return failed("upstream_server_error")
         if media_type != "application/json" or len(raw) > 128 * 1024:
             return failed("invalid_response")
         try:
             document = json.loads(raw.decode("utf-8"))
-            content = document["choices"][0]["message"]["content"]
+            choice = document["choices"][0]
+            content = choice["message"]["content"]
             usage = _sanitize_deepseek_usage(document.get("usage"))
-        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError):
+        except (UnicodeDecodeError, json.JSONDecodeError, KeyError, IndexError, TypeError, RecursionError):
+            return failed("invalid_response")
+        if choice.get("finish_reason") == "length":
+            return failed("upstream_response_truncated")
+        if choice.get("finish_reason") not in (None, "stop"):
             return failed("invalid_response")
         if not isinstance(content, str) or not content.strip():
             return failed("invalid_response")
         try:
             envelope = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             return failed("invalid_response")
-        if not isinstance(envelope, dict) or set(envelope) - {"reply"}:
+        if not isinstance(envelope, dict) or set(envelope) != {"reply"}:
             return failed("invalid_response")
         reply = envelope.get("reply")
         if not isinstance(reply, str) or not reply.strip() or len(reply.strip()) > MAX_REPLY_CHARS_PLATFORM:
@@ -3757,11 +3786,6 @@ class PlatformService:
             "向量结果只能补充背景，不能据此推断或更改当前题正确答案。清楚区分官方资料和 AI 分析，"
             "不得把 AI 分析伪装成官方答案；引用原文依据；资料不足就明确说不知道，禁止编造。"
             "不要输出隐藏思维链。\n"
-            "只输出一个合法 JSON 对象，顶层只允许一个字段：{\"reply\": \"面向用户的 Markdown 文本\"}。"
-            "reply 必须是普通用户可读的简体中文 Markdown：先用一两句话直接回答，再用 ### 短标题、"
-            "自然段、有序/无序列表展开；英语例句保留英文并用引用块呈现；"
-            "不得在 reply 中出现 questionId、officialFound、trace、generation 等内部字段名，"
-            "不得把整个 JSON 再包进代码块。"
         )
         if disclaimer:
             system += f" 当前题没有找到官方解析，reply 开头必须原样包含：{disclaimer}"

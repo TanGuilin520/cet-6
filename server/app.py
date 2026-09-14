@@ -16,6 +16,7 @@ browser request cannot turn the proxy into an arbitrary URL fetcher.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -95,7 +96,10 @@ def load_project_env(path: Path) -> None:
         os.environ.setdefault(name, value)
 
 
+DEEPSEEK_KEY_SOURCE = "environment" if "DEEPSEEK_API_KEY" in os.environ else "project_env"
 load_project_env(PROJECT_ROOT / ".env")
+if "DEEPSEEK_API_KEY" not in os.environ:
+    DEEPSEEK_KEY_SOURCE = "none"
 
 
 def configured_deepseek_key() -> str:
@@ -539,13 +543,43 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Serve Reading Lab with local TTS and a DeepSeek proxy.")
     parser.add_argument("--host", default="127.0.0.1", help="host interface (default: 127.0.0.1)")
     parser.add_argument("--port", default=4173, type=int, help="TCP port (default: 4173)")
+    parser.add_argument("--check", action="store_true", help="show local configuration without starting a server or calling AI")
     args = parser.parse_args()
 
-    with ThreadingHTTPServer((args.host, args.port), ReadingLabHandler) as server:
+    key_configured = bool(configured_deepseek_key())
+    if args.check:
+        model, _ = resolve_deepseek_model(os.environ.get("CET_AGENT_DEEPSEEK_MODEL") or os.environ.get("DEEPSEEK_MODEL"))
+        print(json.dumps({
+            "python": ".".join(map(str, sys.version_info[:3])),
+            "interpreter": sys.executable,
+            "deepseekKeyConfigured": key_configured,
+            "deepseekKeySource": DEEPSEEK_KEY_SOURCE,
+            "deepseekModel": model,
+            "agentConfigured": bool(os.environ.get("CET_AGENT_URL", "").strip()),
+            "note": "Local configuration only; API credentials and Agent connectivity have not been verified.",
+        }, ensure_ascii=False, indent=2))
+        return 0
+
+    try:
+        http_server = ThreadingHTTPServer((args.host, args.port), ReadingLabHandler)
+    except OSError as error:
+        if error.errno != errno.EADDRINUSE:
+            raise
+        print(
+            f"端口 {args.port} 已被占用。请确认原服务的终端，或使用 "
+            "`bash tools/start.sh --port 4174` 选择其他端口。",
+            file=sys.stderr,
+        )
+        return 2
+    with http_server as server:
+        # Recover interrupted jobs only when a real server successfully starts.
+        # Importing the application for diagnostics or tests must not change jobs.
+        PLATFORM_API.service._recover_interrupted_jobs()
         print(f"Reading Lab is running at http://{args.host}:{args.port}")
         print("Word pronunciation endpoint: /api/tts?word=example")
         print("DeepSeek chat endpoint: POST /api/deepseek")
-        if not configured_deepseek_key():
+        print(f"DeepSeek: {'configured' if key_configured else 'disabled'} (key source: {DEEPSEEK_KEY_SOURCE})")
+        if not key_configured:
             print("DeepSeek is disabled until DEEPSEEK_API_KEY is set in .env or the environment.")
         try:
             server.serve_forever()
