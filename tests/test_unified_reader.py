@@ -1,13 +1,7 @@
-"""Regression contracts for the unified full-paper reader entry.
-
-These tests deliberately stay independent from ``test_platform.py`` so the
-home/catalog integration and the checked-in built-in paper data cannot drift
-back to the old, unrelated single-passage practice page.
-"""
+"""Contracts for upload-only entries and preserved legacy test fixtures."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sys
@@ -70,20 +64,22 @@ class UnifiedHomeContractTests(unittest.TestCase):
         start_paper = javascript_function(self.source, "startPaper")
         reader_url = javascript_function(self.source, "unifiedReaderUrl")
         self.assertIn("reader.html?paper=", reader_url)
-        self.assertIn("&cachefix=2", reader_url)
+        self.assertIn("&cachefix=20261007-platform-1", reader_url)
         self.assertIn("unifiedReaderUrl(paper.runtimePaperId)", start_paper)
         self.assertIn("paper.runtimePaperId", start_paper)
         self.assertNotIn("practice.html", start_paper)
 
-    def test_home_has_no_fictitious_simulation_catalog(self) -> None:
-        self.assertIn("const papers = [builtInPaper]", self.source)
+    def test_home_starts_empty_without_a_builtin_or_simulation_catalog(self) -> None:
+        self.assertIn("const papers = []", self.source)
+        self.assertNotIn("builtInPaper", self.source)
+        self.assertNotIn(BUILT_IN_ID, self.source)
         for old_placeholder in ("2025-12-01", "2025-06-02", "2024-12-03", "2023-06-01"):
             self.assertNotIn(old_placeholder, self.source)
 
         render_card = javascript_function(self.source, "renderPaperCard")
         render_catalog = javascript_function(self.source, "renderPapers")
-        self.assertIn("paper.isBuiltIn", render_card)
-        self.assertIn("paper.isBuiltIn", render_catalog)
+        self.assertNotIn("paper.isBuiltIn", render_card)
+        self.assertNotIn("paper.isBuiltIn", render_catalog)
         self.assertNotIn("paper.isRealPaper", render_card)
         self.assertNotIn("paper.isRealPaper", render_catalog)
         self.assertIn("availableYears", render_catalog)
@@ -97,20 +93,17 @@ class UnifiedHomeContractTests(unittest.TestCase):
         self.assertIn("fetch('/api/exams'", load)
         self.assertIn("papers.splice(", load)
 
-    def test_imported_copy_of_builtin_is_deduplicated_by_source_sha(self) -> None:
-        source_pdf = BUILT_IN_ROOT / "source.pdf"
-        self.assertEqual(hashlib.sha256(source_pdf.read_bytes()).hexdigest(), SOURCE_SHA256)
-        self.assertIn(f"const BUILT_IN_SOURCE_SHA256 = '{SOURCE_SHA256}'", self.source)
+    def test_user_uploads_are_not_hidden_by_source_sha(self) -> None:
+        self.assertNotIn("BUILT_IN_SOURCE_SHA256", self.source)
+        self.assertNotIn(SOURCE_SHA256, self.source)
         load = javascript_function(self.source, "loadReadyExams")
-        self.assertIn("paper.paperSha256 === BUILT_IN_SOURCE_SHA256", load)
-        self.assertIn("paper.paperSha256 !== BUILT_IN_SOURCE_SHA256", load)
-        self.assertNotIn("builtInPaper.runtimePaperId = builtInRuntime.runtimePaperId", load)
-        self.assertIn("runtimePaperId: '2021-06-01'", self.source)
-        self.assertRegex(load, r"builtInPaper\.(?:hasAudio|hasAnswer|hasQuestions)")
+        self.assertNotIn("paperSha256", load)
+        self.assertIn("seen.has(paper.id)", load)
+        self.assertIn("...readyPapers", load)
 
 
 class UnifiedCatalogBackendTests(unittest.TestCase):
-    def test_exam_catalog_exposes_paper_sha_for_frontend_deduplication(self) -> None:
+    def test_exam_catalog_preserves_uploaded_source_fingerprint(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
             exam = root / EXAM_ID
@@ -166,26 +159,23 @@ class BuiltInReaderContractTests(unittest.TestCase):
         cls.question_document = json.loads((BUILT_IN_ROOT / "questions.json").read_text(encoding="utf-8"))
         cls.answer_document = json.loads((BUILT_IN_ROOT / "answers.json").read_text(encoding="utf-8"))
 
-    def test_builtin_uses_manifest_driven_audio_and_shared_question_ai_urls(self) -> None:
-        expected = {
-            "manifestUrl": f"/api/papers/{BUILT_IN_ID}/manifest",
-            "questionsUrl": f"/api/papers/{BUILT_IN_ID}/questions",
-            "answersUrl": f"/api/papers/{BUILT_IN_ID}/answers",
-            "assistantUrl": f"/api/papers/{BUILT_IN_ID}/assistant",
-        }
-        for field, url in expected.items():
-            self.assertRegex(
-                self.javascript,
-                rf"{field}:\s*['\"]{re.escape(url)}['\"]",
-            )
+    def test_upload_reader_uses_manifest_audio_and_question_ai_urls(self) -> None:
+        self.assertIn("const uploadedApiRoot = `/api/exams/${encodeURIComponent(paperId)}`", self.javascript)
+        for field, resource in {
+            "manifestUrl": "manifest", "questionsUrl": "questions",
+            "answersUrl": "answers", "assistantUrl": "assistant",
+        }.items():
+            self.assertIn(f"{field}: `${{uploadedApiRoot}}/{resource}`", self.javascript)
+        self.assertNotIn("/api/papers/", self.javascript)
+        self.assertNotIn(BUILT_IN_ID, self.javascript)
+        self.assertNotIn("assets/papers/", self.html)
+        self.assertIn("location.replace('upload.html')", self.javascript)
         self.assertIn('id="ai-floating-launcher"', self.html)
         self.assertIn('id="ai-question-panel"', self.html)
         self.assertIn('id="exam-audio"', self.html)
         self.assertIn('id="question-workspace"', self.html)
         self.assertIn("aiLauncher.hidden = !paperConfig.assistantUrl", self.javascript)
 
-        built_in_config = self.javascript[:self.javascript.index("const requestedPaperId")]
-        self.assertNotIn("audioUrl:", built_in_config)
         configure_audio = javascript_function(self.javascript, "configureExamAudio")
         self.assertIn("manifest?.audioUrl", configure_audio)
         self.assertNotIn("paperConfig.audioUrl", configure_audio)
@@ -264,9 +254,12 @@ class StaticAssetFreshnessContractTests(unittest.TestCase):
             with self.subTest(source=name):
                 self.assertIn("unifiedReaderUrl", source)
                 self.assertIn("reader.html?paper=", source)
-                self.assertIn("&cachefix=2", source)
+                self.assertIn("&cachefix=20261007-platform-1", source)
                 self.assertNotIn("practice.html", source)
-        self.assertIn("reader.html?paper=2021-06-01&amp;cachefix=2", upload_html)
+        self.assertNotIn(BUILT_IN_ID, upload_html)
+        ready_link = re.search(r'<a\b[^>]*\bid="open-reader"[^>]*>', upload_html)
+        self.assertIsNotNone(ready_link)
+        self.assertNotIn("href=", ready_link.group(0))
 
 
 if __name__ == "__main__":

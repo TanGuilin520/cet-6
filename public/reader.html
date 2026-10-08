@@ -3,12 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="完整英语四级真题阅读器，支持单词查译朗读、直线、文字矩形荧光标记和选段标签。" />
+    <meta name="description" content="阅读用户上传的英语试卷，支持在线答题、查词、笔记、听力和 AI 辅导。" />
     <meta name="theme-color" content="#243746" />
-    <title>完整试卷 · CET-4 Exam Viewer</title>
-    <link rel="preload" href="assets/papers/2021-06-set-01/pages/page-1.jpg" as="image" type="image/jpeg" />
-    <link rel="stylesheet" href="css/reader.css?v=20260913-ai-reliability-1" />
+    <title>我的试卷 · CET 学习平台</title>
+    <link rel="stylesheet" href="css/reader.css?v=20261008-agent-v1" />
     <link rel="stylesheet" href="css/word-lookup.css?v=20260824-dict-1" />
+    <link rel="stylesheet" href="css/learning.css?v=20261008-learning-loop-1" />
   </head>
   <body>
     <div class="exam-viewer" id="exam-viewer" data-tool="select">
@@ -26,6 +26,9 @@
           </div>
         </div>
         <div class="app-header__end">
+          <a class="header-action writing-library-link" id="open-writing-library" href="writing.html">我的作文模板</a>
+          <a class="header-action writing-library-link" id="open-translation-library" href="translation.html">翻译方法</a>
+          <a class="header-action writing-library-link" href="learning.html">学习记录</a>
           <span class="save-indicator" id="save-indicator"><i></i> 自动保存</span>
           <a class="header-action" id="download-paper" href="#" download>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 20h14" /></svg>
@@ -37,7 +40,7 @@
       <nav class="viewer-toolbar" aria-label="试卷工具栏">
         <div class="toolbar-group toolbar-group--pages" aria-label="翻页">
           <button class="icon-button" id="previous-page" type="button" aria-label="上一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7" /></svg></button>
-          <label class="page-number-control"><input id="current-page" type="number" min="1" value="1" aria-label="当前页码" /><span>/ <b id="page-count">8</b></span></label>
+          <label class="page-number-control"><input id="current-page" type="number" min="1" value="1" aria-label="当前页码" /><span>/ <b id="page-count">–</b></span></label>
           <button class="icon-button" id="next-page" type="button" aria-label="下一页"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>
         </div>
 
@@ -53,8 +56,8 @@
         <span class="toolbar-separator" aria-hidden="true"></span>
 
         <div class="toolbar-group toolbar-group--marks" aria-label="标注工具">
-          <button class="tool-button" type="button" data-tool="select" aria-pressed="true" title="单击单词查译并朗读；拖选一段文字记录标签">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h5M7.5 4v16M5 20h5" /><path d="m13 11 7 3-3 1.5L15.5 19z" /></svg><span>查词 / 标签</span>
+          <button class="tool-button" type="button" data-tool="select" aria-pressed="true" title="单击单词查译；拖选后复制、高亮、记笔记或问 AI">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h5M7.5 4v16M5 20h5" /><path d="m13 11 7 3-3 1.5L15.5 19z" /></svg><span>查词 / 笔记</span>
           </button>
           <button class="tool-button" type="button" data-tool="copy" aria-pressed="false" title="拖选文字并复制纯文本">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="8" y="8" width="11" height="11" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" /></svg><span>选段复制</span>
@@ -73,6 +76,9 @@
           <button class="tool-button" id="undo-mark" type="button" disabled title="撤回最近一次标注">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5" /><path d="M4 12h10a6 6 0 0 1 6 6" /></svg><span>撤回</span>
           </button>
+          <button class="tool-button" id="redo-mark" type="button" disabled title="重做最近一次撤回的标注">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5" /><path d="M20 12H10a6 6 0 0 0-6 6" /></svg><span>重做</span>
+          </button>
         </div>
 
         <div class="toolbar-group toolbar-group--view">
@@ -84,16 +90,16 @@
         </div>
       </nav>
 
+      <div id="answer-sync-conflict" class="answer-sync-conflict" role="alert" hidden><span>当前题在另一窗口已修改。未保存输入仍保留，请选择要采用的版本。</span><button id="answer-conflict-use-current" type="button">保留本页输入</button><button id="answer-conflict-use-saved" type="button">采用已保存版本</button></div>
       <div class="viewer-body">
         <aside class="thumbnail-sidebar" id="thumbnail-sidebar" aria-label="页面缩略图">
-          <header><div><span>DOCUMENT</span><strong>完整试卷</strong></div><b id="sidebar-page-count">8 页</b></header>
+          <header><div><span>DOCUMENT</span><strong>完整试卷</strong></div><b id="sidebar-page-count">载入中</b></header>
           <div class="thumbnail-list" id="thumbnail-list"></div>
         </aside>
 
         <main class="document-viewport" id="document-viewport" tabindex="0" aria-label="完整试卷页面">
           <div class="viewer-loading" id="viewer-loading">
-            <img class="viewer-loading-preview" src="assets/papers/2021-06-set-01/pages/page-1.jpg" alt="2021 年 6 月四级真题第 1 套首页预览" />
-            <div class="viewer-loading-status"><span></span><p>正在载入完整试卷与文字层…</p></div>
+            <p>正在载入你上传的试卷与文字层…</p>
           </div>
           <div class="document-pages" id="document-pages"></div>
         </main>
@@ -132,34 +138,47 @@
           <header><div><span>ANNOTATIONS</span><strong>我的标注</strong></div><b id="annotation-total">0</b></header>
           <section class="tool-guide" id="tool-guide">
             <span class="guide-icon" aria-hidden="true">T</span>
-            <div><b>查词与选段标签</b><p>单击单词查看翻译并朗读；拖选一段文字记录标签。切换荧光笔则生成规整文字矩形。</p></div>
+            <div><b>查词与选段笔记</b><p>单击单词查译；拖选后，在浮动工具条选择复制、高亮、记笔记或问 AI。荧光笔模式支持连续拖选标记。</p></div>
           </section>
           <dl class="mark-stats">
             <div><dt id="line-count">0</dt><dd>直线</dd></div>
             <div><dt id="highlight-count">0</dt><dd>荧光标记</dd></div>
-            <div><dt id="tag-count">0</dt><dd>段落标签</dd></div>
+            <div><dt id="tag-count">0</dt><dd>段落笔记</dd></div>
           </dl>
           <section class="tag-records">
-            <div class="panel-heading"><h2>段落标签</h2><span>点击定位</span></div>
-            <ul id="tag-record-list"><li class="empty-record">还没有标签。选择“查词 / 标签”后拖选试卷文字。</li></ul>
+            <div class="panel-heading"><h2>段落笔记</h2><span>点击定位与编辑</span></div>
+            <button class="resume-note-draft" id="resume-note-draft" type="button" hidden>继续编辑未保存的笔记</button>
+            <ul id="tag-record-list"><li class="empty-record">还没有笔记。拖选试卷文字，点击浮动工具条中的“笔记”。</li></ul>
           </section>
           <section class="viewer-tip"><b>操作提示</b><p>直线只记录起点与终点，因此始终笔直；荧光笔严格使用文字坐标，不会画歪。</p></section>
         </aside>
       </div>
 
-      <section class="tag-editor" id="tag-editor" role="dialog" aria-labelledby="tag-editor-title" aria-hidden="true">
-        <p class="editor-kicker">SELECTION TAG</p>
-        <h2 id="tag-editor-title">记录所选文本</h2>
+      <div class="selection-toolbar" id="selection-toolbar" role="toolbar" aria-label="所选文本操作" aria-hidden="true">
+        <button type="button" data-selection-action="lookup" title="查询点击的单词" hidden>查词</button>
+        <button type="button" data-selection-action="copy" title="复制所选文本">复制</button>
+        <button type="button" data-selection-action="highlight" title="用当前颜色高亮所选文本">高亮</button>
+        <label class="selection-color-control" title="高亮颜色"><input id="selection-highlight-color" type="color" value="#f6d64a" aria-label="高亮颜色" /></label>
+        <button type="button" data-selection-action="note" title="为所选文本添加笔记">笔记</button>
+        <button type="button" data-selection-action="expression" title="收藏所选句子到表达库">收藏表达</button>
+        <button type="button" data-selection-action="ai" title="向 AI 提问所选文本">问 AI</button>
+        <button class="selection-toolbar-close" type="button" data-selection-action="dismiss" aria-label="收起所选文本工具条" title="收起工具条">×</button>
+      </div>
+
+      <section class="tag-editor" id="tag-editor" role="dialog" aria-modal="false" aria-labelledby="tag-editor-title" aria-hidden="true">
+        <p class="editor-kicker">READING NOTE</p>
+        <h2 id="tag-editor-title">记录阅读笔记</h2>
         <p class="selected-quote" id="selected-quote"></p>
+        <label class="editor-field editor-field--note"><span>笔记内容</span><textarea id="tag-note" rows="7" maxlength="6000" placeholder="记录你的理解、句子结构、证据或复习提示…"></textarea></label>
+        <div class="note-draft-row"><p id="note-draft-status" role="status" aria-live="polite">输入内容后自动保存草稿</p><button class="discard-note-draft" id="discard-note-draft" type="button" hidden>丢弃草稿</button></div>
         <div class="tag-options" role="radiogroup" aria-label="常用标签">
           <button type="button" data-tag-label="重点" data-tag-tone="amber" role="radio" aria-checked="true">重点</button>
           <button type="button" data-tag-label="长难句" data-tag-tone="blue" role="radio" aria-checked="false">长难句</button>
           <button type="button" data-tag-label="生词" data-tag-tone="green" role="radio" aria-checked="false">生词</button>
           <button type="button" data-tag-label="疑问" data-tag-tone="purple" role="radio" aria-checked="false">疑问</button>
         </div>
-        <label class="editor-field"><span>标签名称</span><input id="tag-label" type="text" maxlength="16" value="重点" /></label>
-        <label class="editor-field editor-field--note"><span>复习备注</span><textarea id="tag-note" rows="3" maxlength="260" placeholder="记录证据、语法点或复习提示（可选）…"></textarea></label>
-        <div class="editor-actions"><button class="delete-button" id="delete-tag" type="button" hidden>删除标签</button><span></span><button class="secondary-button" id="cancel-tag" type="button">取消</button><button class="primary-button" id="save-tag" type="button">保存标签</button></div>
+        <label class="editor-field"><span>标签名称</span><input id="tag-label" type="text" maxlength="16" placeholder="重点（可选）" /></label>
+        <div class="editor-actions"><button class="delete-button" id="delete-tag" type="button" hidden>删除笔记</button><span></span><button class="secondary-button" id="cancel-tag" type="button">收起（保留草稿）</button><button class="primary-button" id="save-tag" type="button">保存笔记</button></div>
       </section>
 
       <section class="selection-copy-panel" id="selection-copy-panel" role="dialog" aria-modal="false" aria-labelledby="selection-copy-title" aria-hidden="true">
@@ -194,6 +213,7 @@
           <button type="button" role="tab" data-ai-scope="question" aria-selected="true">当前题目</button>
           <button type="button" role="tab" data-ai-scope="selection" aria-selected="false" id="ai-scope-selection" title="先在试卷上选中一段文字" disabled>选中文本</button>
         </div>
+        <p class="ai-runtime-status" id="ai-runtime-status" role="status">正在检查 AI 运行状态…</p>
         <p class="ai-question-context" id="ai-question-context">先从题号导航选择一道题。</p>
         <blockquote class="ai-selection-excerpt" id="ai-selection-excerpt" hidden></blockquote>
         <div class="ai-quick-prompts" id="ai-quick-prompts" aria-label="快捷提问"></div>
@@ -203,6 +223,7 @@
           <button type="button" id="ai-new-chat" class="ai-text-button" title="清空当前对话">新建对话</button>
           <button type="button" id="ai-copy-last" class="ai-text-button" title="复制最近一条 AI 回复">复制回复</button>
           <button type="button" id="ai-retry-last" class="ai-text-button" hidden title="重试上一条失败的提问">重试</button>
+          <button type="button" id="ai-stop-reply" class="ai-text-button" hidden>停止生成</button>
         </div>
         <form class="ai-question-form" id="ai-question-form">
           <label for="ai-question-input" id="ai-input-label">针对当前题提问（Enter 发送，Shift+Enter 换行）</label>
@@ -214,6 +235,9 @@
       <div class="toast" id="viewer-toast" role="status" aria-live="polite"></div>
     </div>
     <script src="js/word-lookup.js?v=20260824-dict-1"></script>
-    <script src="js/reader.js?v=20260913-ai-reliability-1"></script>
+    <script src="js/writing-templates.js?v=20261007-writing-1"></script>
+    <script src="js/learning-store.js?v=20261008-learning-loop-1"></script>
+    <script src="js/agent-chat.js?v=20261008-agent-v1"></script>
+    <script src="js/reader.js?v=20261008-agent-v1"></script>
   </body>
 </html>

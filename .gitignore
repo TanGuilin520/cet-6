@@ -31,6 +31,14 @@ data/exams/
 # Local LangGraph checkpoints and run state
 data/agent/
 
+# Optional local semantic vectors/model artifacts (never bundle user data)
+data/retrieval/
+data/models/
+.venv-embeddings/
+
+# User-requested external learning notes (private runtime cache, not bundled)
+data/learning-methods/
+
 # Local/editor clutter
 .DS_Store
 *.log

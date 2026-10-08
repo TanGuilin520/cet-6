@@ -66,6 +66,8 @@ class ContractHandler:
 
 class BuiltinPaperApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.demo_env = mock.patch.dict(os.environ, {"CET_ENABLE_DEMO_PAPERS": "1"})
+        self.demo_env.start()
         self.temporary = TemporaryDirectory()
         self.exams = Path(self.temporary.name) / "exams"
         self.exams_patch = mock.patch.object(platform_module, "EXAMS_DIR", self.exams)
@@ -75,6 +77,7 @@ class BuiltinPaperApiTests(unittest.TestCase):
         self.api.service = self.service
 
     def tearDown(self) -> None:
+        self.demo_env.stop()
         self.service._executor.shutdown(wait=True)
         self.exams_patch.stop()
         self.temporary.cleanup()
@@ -89,6 +92,33 @@ class BuiltinPaperApiTests(unittest.TestCase):
                 "reviewRevision": revision,
             }
         ).encode("utf-8")
+
+    def test_platform_default_does_not_offer_demo_documents_or_assistant(self) -> None:
+        with mock.patch.dict(os.environ, {"CET_ENABLE_DEMO_PAPERS": ""}):
+            for resource in ("manifest", "questions", "answers", "audio"):
+                handler = ContractHandler()
+                self.api.handle_get(handler, urlparse(f"/api/papers/{PAPER_ID}/{resource}"))
+                self.assertEqual(handler.responses[0][0], platform_module.HTTPStatus.NOT_FOUND)
+            handler = ContractHandler(self.assistant_payload())
+            self.api.handle_post(handler, urlparse(f"/api/papers/{PAPER_ID}/assistant"))
+            self.assertEqual(handler.responses[0][0], platform_module.HTTPStatus.NOT_FOUND)
+
+    def test_default_http_server_blocks_legacy_static_demo_but_not_uploaded_assets(self) -> None:
+        from server.app import ReadingLabHandler
+
+        handler = object.__new__(ReadingLabHandler)
+        handler.send_error = mock.Mock()
+        with mock.patch.dict(os.environ, {"CET_ENABLE_DEMO_PAPERS": ""}):
+            for path in (
+                "/assets/papers/2021-06-set-01/source.pdf",
+                "/assets/%70apers/2021-06-set-01/pages/page-1.jpg",
+                "/%2fassets/papers/2021-06-set-01/source.pdf",
+                "/assets/audio/../papers/2021-06-set-01/manifest.json",
+                "/practice.html",
+            ):
+                self.assertTrue(handler._block_demo_content(path))
+            self.assertFalse(handler._block_demo_content(f"/api/exams/{RUNTIME_EXAM_ID}/pages/page-1.jpg"))
+            self.assertFalse(handler._block_demo_content("/reader.html"))
 
     def create_runtime_bundle(self, *, revision: int = 3) -> Path:
         directory = self.exams / RUNTIME_EXAM_ID

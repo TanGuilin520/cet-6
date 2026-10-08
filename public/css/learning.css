@@ -1,0 +1,18 @@
+.learning-field { display: grid; gap: .45rem; margin: .8rem 0; color: #375168; font-size: .87rem; }
+.learning-field input, .learning-field textarea, .learning-field select, .learning-expressions > input, .learning-expressions > select { width: 100%; min-width: 0; padding: .7rem; border: 1px solid #d8e3e9; border-radius: 9px; font: inherit; background: #fff; color: #1d384b; box-sizing: border-box; }
+.learning-primary { border: 0; border-radius: 9px; padding: .7rem 1rem; background: #236984; color: #fff; font: inherit; cursor: pointer; }
+.learning-status { color: #526b7c; font-size: .82rem; line-height: 1.6; overflow-wrap: anywhere; }
+.learning-status[data-error="true"] { color: #ac3535; }
+.learning-capture { box-sizing: border-box; border: 1px solid #d7e3e9; border-radius: 18px; padding: 1.5rem; width: min(560px, calc(100vw - 28px)); max-height: 90dvh; overflow-y: auto; color: #1d384b; }
+.learning-capture::backdrop { background: #142f4666; }
+.learning-capture h2 { font-size: 1.2rem; margin: 0; }
+.learning-capture > button { margin: .3rem; padding: .6rem 1rem; border-radius: 8px; cursor: pointer; }
+.learning-expressions { padding: 1rem; border: 1px solid #d9e5eb; border-radius: 12px; background: #f7fafb; margin: 1rem 0; }
+.learning-expressions summary { cursor: pointer; font-weight: 650; color: #236984; }
+.learning-expressions > input, .learning-expressions > select { margin-top: .65rem; }
+.learning-expressions > button { margin-top: .8rem; padding: .6rem; background: white; border: 1px solid #cbdfe7; border-radius: 8px; color: #236984; cursor: pointer; }
+.learning-expression-list { max-height: 360px; overflow-y: auto; }
+.learning-expression-card { padding: .85rem 0; border-bottom: 1px solid #dde7ec; overflow-wrap: anywhere; }
+.learning-expression-card p { white-space: pre-wrap; line-height: 1.6; margin: .4rem 0; }
+.learning-expression-card small { display: block; color: #657c8a; line-height: 1.5; }
+.learning-expression-card button { padding: .4rem .6rem; margin-top: .6rem; color: #236984; border-radius: 7px; border: 1px solid #cbdfe7; background: white; cursor: pointer; }

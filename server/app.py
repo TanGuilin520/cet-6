@@ -20,6 +20,7 @@ import errno
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shutil
 import socket
@@ -29,11 +30,12 @@ from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from urllib.request import Request, urlopen
 
 from .dictionary import DICTIONARY_SERVICE, DictionaryError
-from .platform import PLATFORM_API, resolve_deepseek_model
+from .learning_methods import LEARNING_METHODS_API
+from .platform import PLATFORM_API, legacy_demo_enabled, resolve_deepseek_model
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PUBLIC_DIR = PROJECT_ROOT / "public"
@@ -155,12 +157,17 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
             "/api/papers",
             "/api/dictionary",
             "/api/pronunciation",
+            "/api/learning-methods",
         )):
             return
         super().log_message(format, *args)
 
     def do_GET(self) -> None:  # noqa: N802 - inherited stdlib API
         parsed = urlparse(self.path)
+        if self._block_demo_content(parsed.path):
+            return
+        if LEARNING_METHODS_API.handle_get(self, parsed, include_body=True):
+            return
         if PLATFORM_API.handle_get(self, parsed, include_body=True):
             return
         if parsed.path == "/api/tts":
@@ -176,6 +183,10 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802 - inherited stdlib API
         parsed = urlparse(self.path)
+        if self._block_demo_content(parsed.path):
+            return
+        if LEARNING_METHODS_API.handle_get(self, parsed, include_body=False):
+            return
         if PLATFORM_API.handle_get(self, parsed, include_body=False):
             return
         if parsed.path == "/api/tts":
@@ -189,8 +200,20 @@ class ReadingLabHandler(SimpleHTTPRequestHandler):
             return
         super().do_HEAD()
 
+    def _block_demo_content(self, path: str) -> bool:
+        normalized = "/" + posixpath.normpath(unquote(path)).lstrip("/")
+        if not legacy_demo_enabled() and (
+            normalized == "/assets/papers" or normalized.startswith("/assets/papers/")
+            or normalized == "/practice.html"
+        ):
+            self.send_error(HTTPStatus.NOT_FOUND, "Demo content is disabled; upload your own exam")
+            return True
+        return False
+
     def do_POST(self) -> None:  # noqa: N802 - inherited stdlib API
         parsed = urlparse(self.path)
+        if LEARNING_METHODS_API.handle_post(self, parsed):
+            return
         if PLATFORM_API.handle_post(self, parsed):
             return
         if parsed.path in {"/api/deepseek", "/api/chat"}:

@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="在翻译工作台中对照原文练习，查阅自己的六级翻译总结，再记录初译、修改和方法；笔记按试卷和题目保存在本机。" />
+    <title>翻译工作台 · 英语学习平台</title>
+    <link rel="stylesheet" href="css/translation.css?v=20261008-agent-v1" />
+    <link rel="stylesheet" href="css/learning.css?v=20261008-learning-loop-1" />
+    <script defer src="js/learning-store.js?v=20261008-learning-loop-1"></script>
+    <script defer src="js/agent-chat.js?v=20261008-agent-v1"></script>
+    <script defer src="js/translation.js?v=20261008-agent-v1"></script>
+    <script defer src="js/translation-methods.js?v=20261008-learning-loop-1"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#translation-source-text">跳到翻译笔记</a>
+    <div class="translation-shell">
+      <header class="translation-header">
+        <a class="translation-brand" href="index.html"><span class="brand-mark" aria-hidden="true">T</span><span><strong>英语学习平台</strong><small>YOUR TRANSLATION WORKSPACE</small></span></a>
+        <nav aria-label="主导航"><a id="back-to-reader" href="index.html" hidden>返回当前题目</a><a href="index.html#papers">我的试卷</a><a id="open-writing-library" href="writing.html">作文模板</a><a href="translation.html" aria-current="page">翻译工作台</a><a href="learning.html">我的学习记录</a></nav>
+      </header>
+      <main>
+        <section class="translation-intro">
+          <div><p class="eyebrow">READ · TRANSLATE · REFLECT</p><h1>翻译工作台 <span>让学过的方法，真正用起来</span></h1><p>左边查方法，中间练翻译，右边看原始笔记和例句。每次修改都留下理由，而不只是一个答案。</p></div>
+          <div class="workspace-promise"><span aria-hidden="true">↗</span><p>从试卷进入，回到原题。<small>保留自己的作答，不自动覆盖。</small></p></div>
+        </section>
+        <p id="translation-context" class="context-banner">独立翻译笔记</p>
+        <div class="translation-workspace-controls"><button id="translation-focus-toggle" type="button" class="secondary-button" aria-pressed="false">专注编辑</button><span>题目、笔记和资料分别保存；应用答案需要你的确认。</span></div>
+        <div class="translation-view-tabs" role="tablist" aria-label="翻译工作区"><button type="button" role="tab" data-translation-view="practice" aria-selected="true">作答</button><button type="button" role="tab" data-translation-view="methods" aria-selected="false">方法</button><button type="button" role="tab" data-translation-view="resources" aria-selected="false">资料</button></div>
+        <div class="translation-workspace">
+          <aside class="catalog-panel" aria-labelledby="method-title">
+            <header class="panel-heading"><div><p class="eyebrow">01 · FIND YOUR METHOD</p><h2 id="method-title">方法目录</h2></div><span id="translation-method-count" class="state-badge">未加载</span></header>
+            <div class="method-source-tabs" role="tablist" aria-label="翻译方法来源">
+              <button id="translation-source-github" type="button" role="tab" aria-selected="true" aria-controls="translation-method-catalog" data-method-source="github">GitHub 总结</button>
+              <button id="translation-source-personal" type="button" role="tab" aria-selected="false" aria-controls="translation-method-catalog" tabindex="-1" data-method-source="personal">我的资料</button>
+            </div>
+            <label class="catalog-search" for="translation-method-search"><span>查找方法</span><input id="translation-method-search" type="search" maxlength="120" placeholder="搜句型、时态、随着…" autocomplete="off" /></label>
+            <p id="translation-catalog-status" class="catalog-status" role="status" aria-live="polite">正在读取已加载的学习资料…</p>
+            <div id="translation-method-catalog" class="method-catalog" role="tabpanel" aria-labelledby="translation-source-github"><p class="catalog-empty">方法目录会在这里显示。</p></div>
+            <div class="catalog-footer"><button id="refresh-translation-methods" type="button" class="secondary-button">加载 GitHub 笔记</button><a href="#personal-method-editor" class="catalog-personal-link">整理我的资料 ↓</a><p>只有点击加载才访问公开仓库；不调用 AI，不产生模型费用。</p></div>
+          </aside>
+          <section class="note-panel" aria-labelledby="note-title">
+            <header class="panel-heading"><div><p class="eyebrow">02 · YOUR TRANSLATION</p><h2 id="note-title">翻译练习与复盘</h2></div><span id="translation-note-state" class="state-badge">尚未保存</span></header>
+            <details class="translation-original-block" open><summary>当前翻译题 · 点击折叠或展开</summary><label class="field original-field" for="translation-source-text"><span>原文 / 原句 <small>可选 · 可编辑</small></span><textarea id="translation-source-text" rows="5" maxlength="12000" placeholder="从试卷进入时，能识别的翻译原文会放在这里；也可以粘贴想练习的句子。"></textarea></label>
+            <div class="original-actions"><small id="translation-original-state" role="status" aria-live="polite">原文来自当前试卷，不使用答案解析充当原题。</small><button id="load-translation-original" type="button" class="secondary-button" disabled>重新载入原题</button></div>
+            </details>
+            <div class="translation-comparison">
+              <label class="field" for="translation-first-draft"><span>我的初译 <small>先独立尝试</small></span><textarea id="translation-first-draft" rows="6" maxlength="12000" placeholder="不用急着追求完美，先写下自己的表达。"></textarea></label>
+              <label class="field revised-field" for="translation-revised-text"><span>修改后 <small>对照方法再修正</small></span><textarea id="translation-revised-text" rows="6" maxlength="12000" placeholder="看完方法和例句后，记录修正后的句子。"></textarea></label>
+            </div>
+            <div class="reflection-heading"><h3>这一次，我学到了什么</h3><span>不用填满，留下有价值的一点就好</span></div>
+            <label class="field" for="translation-revision-reason"><span>为什么修改 <small>可选</small></span><textarea id="translation-revision-reason" rows="3" maxlength="12000" placeholder="不只写“语法错误”：这句话是什么语境？为什么需要改时态、语序或搭配？"></textarea></label>
+            <label class="field" for="translation-used-method"><span>使用的方法 <small>可在右侧一键记录</small></span><textarea id="translation-used-method" rows="2" maxlength="12000" placeholder="例如：先找主干，再处理修饰语。也可选中右侧方法，点击“记录本次使用”。"></textarea></label>
+            <div id="translation-bound-methods" class="translation-bound-methods" aria-label="已关联的方法"></div>
+            <label class="field" for="translation-free-note"><span>自由笔记 <small>可单独填写</small></span><textarea id="translation-free-note" rows="4" maxlength="12000" placeholder="记下你的疑问、词汇或心得，不必把所有字段填满。"></textarea></label>
+            <div class="note-actions"><p>每个字段最多 12,000 字符。这里是独立学习笔记，不会自动覆盖试卷中的翻译作答。</p><button id="save-translation-note" type="button" class="primary-button">保存这份笔记</button></div>
+            <section class="translation-apply-panel" aria-labelledby="translation-apply-title"><h3 id="translation-apply-title">把译文应用到本题</h3><label for="translation-answer-source">使用的版本 <select id="translation-answer-source"><option value="revised">修改后（优先）</option><option value="firstDraft">我的初译</option></select></label><p id="translation-apply-state" role="status">正在确认当前翻译题。未绑定真实题号时仅保存笔记。</p><button id="apply-translation-answer" type="button" class="primary-button" disabled>预览并应用到本题</button></section>
+            <section class="translation-ai-panel" aria-labelledby="translation-ai-title"><h3 id="translation-ai-title">按我的方法辅导</h3><p>点击才会请求 AI，结合当前题目和当前译文进行分析；无题号时发送原文及译文片段（各最多 3,000 字符）。AI 建议不会改动你的答案。</p><label class="translation-ai-consent"><input id="translation-ai-consent" type="checkbox" /> 本次允许检索我保存的翻译笔记及个人方法</label><p>授权后发送个人方法前 3,000 字符及最多 3 份相关或近期笔记的有限片段，不上传整个浏览器资料库。</p><div class="translation-ai-prompts"><button type="button" data-translation-ai="hint" class="secondary-button">只提示下一步</button><button type="button" data-translation-ai="review" class="secondary-button">检查这一段</button><button type="button" data-translation-ai="method" class="secondary-button">按我的方法分析</button></div><label class="field" for="translation-ai-input"><span>补充问题 <small>可选 · Enter 发送，Shift+Enter 换行</small></span><textarea id="translation-ai-input" rows="3" maxlength="1500" placeholder="例如：请检查我修改后的第二句，先不要给完整译文。"></textarea></label><button id="send-translation-ai" type="button" class="primary-button">发送问题</button><p id="translation-ai-state" role="status" aria-live="polite">个人资料默认不发送。方法资料不是官方解析。</p><div id="translation-ai-reply" class="translation-ai-reply" aria-live="polite"></div><ul id="translation-ai-citations" class="translation-ai-citations"></ul></section>
+            <section id="translation-expression-library" aria-label="我的表达库"></section>
+            <section id="personal-method-editor" class="personal-method-editor" aria-labelledby="personal-method-title">
+              <header class="panel-heading"><div><p class="eyebrow">YOUR OWN COLLECTION</p><h2 id="personal-method-title">整理我的翻译资料</h2></div><span id="translation-method-state" class="state-badge">本机资料</span></header>
+              <p class="editor-description">保留你自己的版本。以 <code>## 1 方法名</code> 或 <code># 第1节 方法名</code> 分节，左侧“我的资料”就能按方法浏览；普通文字也可以直接保存。</p>
+              <label class="field" for="translation-method-source"><span>个人方法正文 <small>最多 24,000 字符</small></span><textarea id="translation-method-source" rows="7" maxlength="24000" placeholder="粘贴你自己的翻译总结，例如句型使用条件、翻译步骤和容易犯的错误。&#10;也可导入已有的 TXT / MD 笔记。"></textarea></label>
+              <div class="method-actions"><label class="secondary-button file-button" for="translation-method-file">导入 TXT / MD<input id="translation-method-file" type="file" accept=".txt,.md,text/plain,text/markdown" /></label><button id="save-translation-method" type="button" class="primary-button">保存本机方法</button></div>
+              <p class="field-hint">仅接受 UTF-8 TXT / MD，最大 64 KB。导入只更新编辑草稿，点击保存才更新个人方法；GitHub 目录不会替换这里的内容。</p>
+            </section>
+          </section>
+          <aside class="method-detail-panel" aria-labelledby="translation-method-detail-title">
+            <header class="panel-heading"><div><p class="eyebrow">03 · REFERENCE & EXAMPLES</p><h2 id="translation-method-detail-title">方法与例句</h2></div><span id="translation-method-category" class="detail-category" hidden></span></header>
+            <div id="translation-method-detail" class="method-detail"><div class="method-detail-empty"><span aria-hidden="true">Aa</span><h3>把方法放在手边</h3><p>选择左侧的一项方法，在这里对照原始学习笔记和例句，再回到你的翻译。</p></div></div>
+            <div class="method-detail-actions"><button id="use-translation-method" type="button" class="primary-button" disabled>记录本次使用</button><p id="translation-method-use-status" role="status" aria-live="polite">只记录方法名称，不替你改写答案。</p><a class="back-to-practice" href="#note-title">回到翻译练习 ↑</a></div>
+            <section class="translation-method-history" aria-labelledby="translation-method-history-title"><h3 id="translation-method-history-title">我以前在这里的练习</h3><div id="translation-method-history"><p>选择方法，查看关联过的初译、修改与原因。</p></div></section>
+            <div class="method-source-note"><span class="source-kicker">学习资料 · 非官方解析</span><p id="translation-source-attribution">GitHub 笔记：糯糯不爱吃糖根据四六级邹老师授课内容整理；仓库维护：TanGuilin520。</p><p id="translation-source-caution">方法和例句请结合当前语境核对，不将个人总结当作标准答案。</p><a id="translation-method-original-link" href="https://github.com/TanGuilin520/CET6-Translation-Notes" target="_blank" rel="noopener noreferrer">查看 GitHub 原始资料 ↗</a><span id="translation-method-updated-at"></span></div>
+          </aside>
+        </div>
+        <p id="translation-status" class="translation-status" role="status" aria-live="polite">编辑草稿会单独保留；点击保存后才更新本机方法或正式笔记。</p>
+      </main>
+      <footer>个人笔记和方法仅保存在当前浏览器；GitHub 学习资料由服务器缓存，加载时不调用 AI。没有云同步，请保留原始资料备份。</footer>
+    </div>
+    <div class="translation-mobile-actions"><button id="translation-mobile-save" type="button" class="secondary-button">保存笔记</button><button id="translation-mobile-apply" type="button" class="primary-button" disabled>应用并返回</button><a id="translation-mobile-back" href="index.html">返回试卷</a></div>
+    <dialog id="translation-answer-preview" aria-labelledby="translation-answer-preview-title"><h2 id="translation-answer-preview-title">确认本题译文</h2><p id="translation-answer-preview-context"></p><pre id="translation-answer-preview-text"></pre><details id="translation-existing-answer" hidden><summary>查看当前试卷中的旧答案</summary><pre id="translation-existing-answer-text"></pre></details><label id="translation-overwrite-label" hidden><input id="translation-overwrite-confirm" type="checkbox" /> 我确认用以上译文覆盖本题旧答案</label><p id="translation-answer-preview-state" role="status"></p><div class="translation-dialog-actions"><button id="cancel-translation-answer" type="button" class="secondary-button">继续编辑</button><button id="confirm-translation-answer" type="button" class="primary-button">应用到本题并返回</button></div></dialog>
+  </body>
+</html>

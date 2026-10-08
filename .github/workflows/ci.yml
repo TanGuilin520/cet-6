@@ -10,6 +10,10 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ""
+      CET_AGENT_URL: ""
+      CET_EMBEDDING_URL: ""
     strategy:
       fail-fast: false
       matrix:
@@ -39,15 +43,26 @@ jobs:
           server/platform.py
           server/dictionary.py
           server/agent_client.py
+          server/chat_stream.py
+          server/retrieval.py
           server/paddle_ocr.py
           server/__main__.py
           services/agent/app.py
+          services/agent/conversation_memory.py
+          services/agent/runtime_tools.py
+          services/embeddings/app.py
           services/paddleocr/app.py
           tools/build_exam_assets.py
           tools/run_agent_evals.py
+          tools/start_platform.py
 
       - name: Validate agent eval fixtures
-        run: python tools/run_agent_evals.py --validate-only
+        run: |
+          python tools/run_agent_evals.py --validate-only
+          python tools/run_agent_evals.py --cases evals/agent_v1_cases.jsonl --validate-only
+
+      - name: Offline Agent contract baseline (no inherited keys or model API)
+        run: python tools/run_agent_evals.py --cases evals/agent_v1_cases.jsonl --offline --min-pass-rate 1 --json
 
       - name: Check browser scripts
         run: |
@@ -55,6 +70,11 @@ jobs:
           node --check public/js/upload.js
           node --check public/js/review.js
           node --check public/js/reader.js
+          node --check public/js/agent-chat.js
+          node --check public/js/translation.js
+          node --check public/js/writing.js
+          node --check public/js/learning-store.js
+          node --check public/js/learning.js
           node --check public/js/practice.js
           if [ -f public/js/word-lookup.js ]; then node --check public/js/word-lookup.js; fi
 

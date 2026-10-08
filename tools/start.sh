@@ -11,4 +11,4 @@ fi
 cd -- "$project_dir"
 # ROS and other system packages may export a Python 3.8 PYTHONPATH. The
 # project uses its own venv; inherited paths are not required to run it.
-exec env -u PYTHONPATH "$project_python" -m server "$@"
+exec env -u PYTHONPATH "$project_python" tools/start_platform.py "$@"

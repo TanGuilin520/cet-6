@@ -449,7 +449,7 @@ class LangGraphRuntimeSmokeTests(unittest.TestCase):
     def test_real_tutor_graph_compiles_and_invokes_with_deterministic_fallback(self):
         self.langgraph_available()
         with TemporaryDirectory() as temporary:
-            runtime = AgentRuntime(checkpoint_path=Path(temporary) / "checkpoints.sqlite3")
+            runtime = AgentRuntime(checkpoint_path=Path(temporary) / "checkpoints.sqlite3", deepseek=agent_app.DeepSeekClient(env={}))
             self.assertTrue(runtime.ready, runtime.detail)
             document = runtime.invoke_tutor(validate_tutor_request(tutor_request()))
 

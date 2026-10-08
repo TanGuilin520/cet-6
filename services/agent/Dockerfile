@@ -22,7 +22,7 @@ RUN groupadd --gid "${AGENT_GID}" cet-agent \
 WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN python -m pip install --no-cache-dir -r /app/requirements.txt
-COPY app.py /app/app.py
+COPY app.py conversation_memory.py runtime_tools.py /app/
 
 EXPOSE 8770
 USER cet-agent:cet-agent

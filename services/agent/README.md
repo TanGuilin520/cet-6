@@ -1,294 +1,189 @@
-# CET LangGraph agent runtime
+# CET LangGraph runtime v1
 
-This optional Python 3.11 sidecar adds a bounded, auditable Agent workflow
-without adding any dependency to the main PDF reader server (also Python
-3.11, see `.python-version`). It exposes two
-graphs:
+An optional Python 3.11 sidecar for bounded, question-scoped tutoring and
+suggest-only review. Main PDF/OCR, deterministic grading, immutable revision
+publication and native reader remain unchanged.
 
-- `POST /v1/tutor`: route a question, read only the supplied question/answer
-  context, retrieve question-ID evidence before vector supplements, draft a
-  reply, and run a grounding guard.
-- `POST /v1/review/suggest`: inspect one existing review issue and return only
-  field-level `proposals`. It cannot apply a review patch or write exam data.
+## Run locally
 
-The runtime deliberately has no shell, filesystem, browser, arbitrary URL, or
-database-write tool. Evidence is untrusted data and is available only through
-the request body supplied by the main CET server. Deterministic OCR, grading,
-revision publication, and ETag checks remain in the main application.
-
-LangGraph is imported lazily. Importing `services.agent.app` from the main
-server process stays safe, but `/healthz` reports `not_ready` until the
-sidecar runs with its own LangGraph installation. A ready runtime requires
-Python 3.11+, LangGraph, and a writable SQLite checkpoint. It
-does not silently fall back to an in-memory checkpointer.
-
-Official references:
-
-- <https://docs.langchain.com/oss/python/langgraph/overview>
-- <https://docs.langchain.com/oss/python/langgraph/persistence>
-- <https://docs.langchain.com/oss/python/langgraph/interrupts>
-
-## Local run
-
-From the repository root:
+Explicitly install optional dependencies once:
 
 ```bash
-.venv-main/bin/python -m venv .venv-agent
+python3.11 -m venv .venv-agent
 .venv-agent/bin/python -m pip install -r services/agent/requirements.txt
-mkdir -p data/agent
-CET_AGENT_CHECKPOINT_PATH="$PWD/data/agent/checkpoints.sqlite3" \
-  .venv-agent/bin/python -m services.agent.app
+bash tools/start.sh
 ```
 
-The default endpoint is `http://127.0.0.1:8770`. Configure the main CET server
-to use the same loopback endpoint. Keep the service on loopback unless a
-Bearer token, firewall, and TLS termination are in place.
+The managed launcher reads existing environment/project `.env`, starts a local
+Agent when dependencies are installed, then the original main server. It shares
+a launch-local random token unless configured, without editing `.env`, installing
+packages, downloading models or calling an LLM. It reuses a ready same-token local
+runtime, never takes over an occupied port, and stops only children it created.
+`CET_MANAGED_AGENT=0` opts out; explicit `CET_AGENT_URL` is left operator-managed.
 
-Supported environment variables:
+Manual sidecar mode does NOT automatically load project `.env`:
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `CET_AGENT_HOST` | `127.0.0.1` | Bind address |
-| `CET_AGENT_PORT` | `8770` | Bind port |
-| `CET_AGENT_TOKEN` | empty | Optional shared Bearer token |
-| `CET_AGENT_CHECKPOINT_PATH` | `/data/agent-checkpoints.sqlite3` | Required writable SQLite checkpoint |
-| `CET_AGENT_CHECKPOINT_MAX_THREADS` | `50` | Retain only the newest graph runs, including failed runs (1–10000) |
-| `DEEPSEEK_API_KEY` | empty | Optional grounded reply drafting |
-| `CET_AGENT_DEEPSEEK_URL` | DeepSeek HTTPS chat-completions endpoint | Model endpoint |
-| `CET_AGENT_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Model name; `deepseek-v4-pro` optional. Retired names map automatically (`deepseek-chat`→`deepseek-v4-flash`, `deepseek-reasoner`→`deepseek-v4-pro`) |
-| `CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS` | `25` | Model timeout, bounded to 1–120 seconds |
+```bash
+CET_AGENT_TOKEN='replace-with-a-long-random-token' \
+CET_AGENT_CHECKPOINT_PATH="$PWD/data/agent/checkpoints.sqlite3" \
+DEEPSEEK_API_KEY='your-optional-key' \
+.venv-agent/bin/python -m services.agent.app --host 127.0.0.1 --port 8770
+```
 
-Without `DEEPSEEK_API_KEY`, both graphs still run. Tutor replies fall back to a
-conservative evidence summary and explicitly refuse to guess when official
-material is absent. A failed model request also falls back instead of turning
-untrusted context into an answer.
+Configure the same `CET_AGENT_URL / CET_AGENT_TOKEN` for the main server, then use
+`.venv-main/bin/python -m server` (manual main-only entry). Missing Key still
+permits deterministic context retrieval and conservative responses. Health
+checks do not call the provider or prove credentials/balance/teaching quality.
 
-Completed graph states are checkpointed for recent-run inspection, but the
-database is not an unlimited conversation archive. The runtime deletes graph
-threads older than `CET_AGENT_CHECKPOINT_MAX_THREADS`; browser question history
-and immutable review revisions remain owned by the main application.
-
-## Docker
-
-From the repository root, the hardened local Compose profile is the shortest
-way to start the sidecar. It binds port 8770 only on loopback and persists the
-SQLite checkpoint in a named volume:
+Docker remains optional:
 
 ```bash
 docker-compose -f docker-compose.agent.yml up --build -d
 ```
 
-The equivalent direct Docker commands are:
+It binds 8770 only on loopback, runs unprivileged, and persists checkpoints in a
+volume. Shared token/loopback are not a public authentication/tenant scheme.
 
-The Docker build context is this directory, not the repository root:
+## Environment
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `CET_AGENT_HOST / CET_AGENT_PORT` | `127.0.0.1 / 8770` | Sidecar bind |
+| `CET_AGENT_TOKEN` | empty in manual mode | Shared service authorization; required for persistent conversation requests and explicit memory clearing |
+| `CET_AGENT_CHECKPOINT_PATH` | `/data/agent-checkpoints.sqlite3` | Writable SQLite checkpoint/memory path |
+| `CET_AGENT_CHECKPOINT_MAX_THREADS` | `50` | Bound retained Runs/conversations, adjustable 1–10000 |
+| `DEEPSEEK_API_KEY` | empty | Optional provider key |
+| `CET_AGENT_DEEPSEEK_URL` | official HTTPS chat-completions | Validated model endpoint |
+| `CET_AGENT_DEEPSEEK_MODEL` | `deepseek-v4-flash` | Overrides `DEEPSEEK_MODEL`; pro optional, retired aliases mapped |
+| `CET_AGENT_DEEPSEEK_TIMEOUT_SECONDS` | `25` | Per-call timeout; dynamic total budget is also enforced |
+
+Main transport timeout (`CET_AGENT_TIMEOUT_SECONDS`, default 40s) should exceed
+the sidecar's bounded dynamic invocation (30s). Main direct general/selection
+calls do not pass through LangGraph.
+
+## Actual tool loop
+
+`question` requests with usable model configuration execute:
+
+```text
+route_intent → model_decision → execute_context_tools → model_decision
+                    └── final / stopped ──→ grounding_guard → finalize
+```
+
+Six context-only tools:
+`get_current_question`, `get_answer_record`, `retrieve_evidence`,
+`retrieve_methods`, `retrieve_personal_notes`, `compare_options`.
+
+Tools read ONLY the bounded, revision-pinned context supplied by the main
+server. They cannot shell, browse, fetch arbitrary URLs, scan local files, write
+database/exam answers or publish revisions. The model can choose/order tools,
+ask follow-ups or return a final Markdown reply. Evidence/summary is untrusted
+data, not instructions. A next-step hint does not expose a full reference answer
+through answer/evidence tools.
+
+Maximum 4 decision rounds, 12 tool calls, 30 seconds and approximately 8,000
+tokens; input estimates and provider usage are advisory protection, NOT a bill
+ceiling. Each provider output is bounded. Invalid/duplicate calls, elapsed time,
+budgets and cancellation stop the loop. No-key/mutation requests use the original
+deterministic route. Upstream/protocol failure cannot silently trigger a second
+model path in the main server.
+
+## Endpoints and contracts
+
+| Endpoint | Behaviour |
+| --- | --- |
+| `GET /healthz` | Authorized readiness only, never calls DeepSeek |
+| `POST /v1/tutor` | Validated question-scoped tutor |
+| `POST /v1/tutor/stream` | Same tutor with real node/tool progress and final result |
+| `POST /v1/conversations/clear` | Explicit authenticated conversation/checkpoint clearing |
+| `POST /v1/review/suggest` | Deterministic read-only proposals; never a review PATCH |
+
+Health schema is `cet-agent-health/2`, service `cet-agent-runtime`. A 200 response
+alone is insufficient: check `ready`, LangGraph/checkpoint readiness and
+`deepseekConfigured` separately. `streaming / dynamicTools / memory` describe
+capabilities; memory is not advertised without a shared token. Readiness imports
+LangGraph lazily and requires writable persistent SQLite, not a silent in-memory
+checkpointer. Credentials and raw upstream errors are never returned.
+
+Tutor preserves `cet-agent-tutor/2` and accepts optional bounded
+`requestId / conversationId`. Main context includes current question,
+officialAnswer, exact/vector evidence, disclaimer/policy and optional authorized
+learningContext/learningEvidence. Object fields/IDs/lengths are strictly checked.
+Legacy schema compatibility remains in the main client.
+
+The response retains reply, citations, safe trace, intent, generation and
+adds optional execution/memory metadata:
+
+```json
+{
+  "execution": {
+    "mode": "dynamic_tools",
+    "rounds": 2,
+    "toolCalls": 3,
+    "stopReason": "final",
+    "budget": {"maxRounds": 4, "maxToolCalls": 12, "maxTokens": 8000, "maxSeconds": 30}
+  },
+  "memory": {
+    "enabled": true,
+    "conversationId": "opaque-client-id",
+    "turns": 2,
+    "summaryPresent": false,
+    "scopeReset": false
+  }
+}
+```
+
+This snippet is NOT a full tutor response. `generation.used=true` means a
+successful provider-generated reply; usage is reported only when available,
+and unknown usage is not zero cost. No hidden chain-of-thought is exposed.
+
+SSE carries safe progress and a terminal whole Markdown response, NOT provider
+token-by-token generation. Cancellation is cooperative: subsequent tools/saving
+can stop, but an already-sent model request may still complete and be billed.
+
+## Memory and privacy
+
+Stable conversations are independent from fresh per-Run graph checkpoints.
+Memory identity pins exam/question/conversation; scope pins revision, current
+question/answer, private consent and private body content. Changed scope removes
+old memory/checkpoints before any history is reused. Persistent requests ignore
+client history to prevent reintroducing revoked personal material.
+
+Keep at most 6 recent turns, 2,000 characters per message, with an extractive
+1,200-character older summary. No extra summarization model request is made;
+summary is not authoritative evidence. Defaults retain at most 50 Runs and 50
+conversations. Explicit clear deletes corresponding checkpoints, records a
+bounded cancellation tombstone and prevents older queued/in-flight requests
+from restoring cleared data. New browser conversation/revoked consent retains
+pending-delete markers when server deletion cannot be confirmed.
+
+This remains local single-user data, without account login, tenant isolation,
+cloud synchronization or backup erasure.
+
+## Retrieval and review boundaries
+
+Actual hybrid search belongs to `server/retrieval.py`: exact ID priority,
+BM25/hash baseline, optional offline local dense/RRF/reranker. This sidecar
+retrieves only its approved evidence pack, not the full source database.
+See [optional local embeddings](../embeddings/README.md). Private note vectors
+are never persisted; current distribution includes no semantic model weights.
+
+Review graph remains `suggest_only`, without model calls or writes. Only current
+issue target and allowlisted question/answer fields can be proposed. User must
+apply to the form, verify original PDF and publish through ETag/revision logic.
+No LangGraph interrupt/resume approval API is claimed.
+
+## Verification
 
 ```bash
-docker build -t cet-agent services/agent
-docker run --rm -p 127.0.0.1:8770:8770 \
-  -v cet-agent-checkpoints:/data \
-  -e CET_AGENT_TOKEN=replace-with-a-long-random-value \
-  -e DEEPSEEK_API_KEY \
-  cet-agent
+env DEEPSEEK_API_KEY= CET_AGENT_URL= CET_EMBEDDING_URL= .venv-agent/bin/python -m unittest discover -s tests -v
+.venv-agent/bin/python tools/run_agent_evals.py --cases evals/agent_v1_cases.jsonl --offline --min-pass-rate 1 --json
 ```
 
-The image runs as an unprivileged user and keeps checkpoints in the mounted
-`/data` volume. Do not put API keys into the image or commit them to Git.
+The 60 synthetic offline cases exercise real LangGraph without a paid key.
+Mechanical source-text matches and answer markers are NOT semantic entailment,
+teaching quality or real-model evaluation. See [eval methodology](../../evals/README.md)
+and [Chinese architecture](../../docs/agent-architecture.md).
 
-## Health contract
-
-`GET /healthz` always returns HTTP 200 after authorization. Consumers must
-check `ready`, not only the HTTP status:
-
-```json
-{
-  "schemaVersion": "cet-agent-health/2",
-  "service": "cet-agent-runtime",
-  "status": "ok",
-  "ready": true,
-  "engine": "langgraph",
-  "pythonVersion": "3.11.16",
-  "langgraphImportReady": true,
-  "checkpointReady": true,
-  "deepseekKeyPresent": false,
-  "deepseekConfigured": false,
-  "deepseekModel": "deepseek-v4-flash",
-  "detail": "LangGraph and SQLite checkpoint are ready"
-}
-
-`deepseekConfigured` is true only when a real key exists **and** the URL/model
-configuration is valid; a key with an invalid model reads as configured=false.
-No health path ever calls DeepSeek, so readiness checks stay free.
-```
-
-If Python, LangGraph, configuration, or the SQLite checkpoint is unavailable,
-`status` is `not_ready`, `ready` is false, and inference endpoints return 503.
-
-## Tutor contract
-
-The top-level object and every evidence object use exact schemas. The `context`
-is assembled by the trusted CET server from one pinned `reviewRevision`:
-
-```json
-{
-  "examId": "exam-20250821-012345abcdef",
-  "questionId": "q26",
-  "reviewRevision": 3,
-  "message": "为什么不能选 A？",
-  "userAnswer": "A",
-  "history": [],
-  "context": {
-    "question": {
-      "questionId": "q26",
-      "number": 26,
-      "type": "single_choice",
-      "stem": "Which statement is supported?",
-      "options": [
-        {"label": "A", "text": "..."},
-        {"label": "C", "text": "..."}
-      ]
-    },
-    "officialAnswer": {
-      "questionId": "q26",
-      "answer": "C",
-      "explanation": "The passage states ...",
-      "source": "answer_pdf"
-    },
-    "evidence": {
-      "exact": [
-        {"questionId": "q26", "kind": "official_explanation", "content": "26. C. The passage states ..."}
-      ],
-      "vector": []
-    },
-    "officialExplanationFound": true,
-    "disclaimer": "",
-    "policy": "question_id_exact_then_vector_context"
-  }
-}
-```
-
-The response includes a persisted `threadId`, safe node names rather than
-hidden chain-of-thought, the read-only tools used, citations, and the existing
-grounding fields:
-
-```json
-{
-  "schemaVersion": "cet-agent-tutor/2",
-  "runId": "b8e0...",
-  "threadId": "b8e0...",
-  "status": "completed",
-  "examId": "exam-20250821-012345abcdef",
-  "questionId": "q26",
-  "reviewRevision": 3,
-  "requestId": "reader-7",
-  "reply": "上传的答案资料记录为 C。...",
-  "intent": "option_explanation",
-  "tools": [{"name": "get_current_question", "status": "completed"}],
-  "citations": [{"source": "rag:exact:official_explanation", "questionId": "q26", "excerpt": "26. C. The passage states ..."}],
-  "grounding": {
-    "status": "official",
-    "officialEvidenceFound": true,
-    "disclaimerRequired": false,
-    "officialExplanationFound": true,
-    "exactMatches": 1,
-    "vectorMatches": 0,
-    "disclaimer": "",
-    "retrievalOrder": ["question_id_exact", "deterministic_vector_supplement"]
-  },
-  "generation": {
-    "provider": "deepseek",
-    "model": "deepseek-v4-flash",
-    "attempted": true,
-    "used": true,
-    "fallbackReason": null,
-    "usage": {"promptTokens": 123, "completionTokens": 80, "totalTokens": 203}
-  },
-  "trace": {
-    "nodes": ["route_intent", "read_context_tools", "retrieve_grounded_evidence", "draft_grounded_reply", "grounding_guard", "finalize_tutor"],
-    "durationMs": 8
-  }
-}
-```
-
-`generation` is versioned metadata about the drafting step: `used=true` means
-the reply came from DeepSeek; otherwise the deterministic fallback ran and
-`fallbackReason` carries a fixed enum (`not_configured`, `invalid_configuration`,
-`blocked_mutation`, `upstream_timeout`, `upstream_auth_error`,
-`upstream_rate_limited`, `upstream_server_error`, `invalid_response`). Usage
-counters come straight from the provider response. Upstream error bodies and
-credentials never appear anywhere in the document. Consumers must accept the
-legacy `cet-agent-tutor/1` shape without `generation` during migration.
-
-A tutor request may carry an optional bounded `requestId`; the response echoes
-it so Reader → main server → sidecar → trace can be correlated.
-```
-
-## Review-suggestion contract
-
-The request is one server-created issue plus bounded review context:
-
-```json
-{
-  "examId": "exam-20250821-012345abcdef",
-  "reviewRevision": 3,
-  "issue": {
-    "issueId": "answer-review:q26",
-    "kind": "answer_review",
-    "targetId": "q26",
-    "message": "答案绑定需要人工复核",
-    "severity": "manualReview",
-    "page": 5
-  },
-  "context": {
-    "question": {"questionId": "q26", "stem": "..."},
-    "answer": {"questionId": "q26", "answer": "C", "parserConfidence": 0.84},
-    "nearbyQuestions": [],
-    "answerConflicts": [],
-    "page": null,
-    "evidence": {
-      "exact": [{"questionId": "q26", "kind": "official_answer", "content": "26. C"}],
-      "vector": []
-    },
-    "policy": "suggest_only_human_approval_required"
-  }
-}
-```
-
-The response cannot be submitted to the existing review PATCH endpoint. It is
-a separate proposal schema intended only to prefill the review form:
-
-```json
-{
-  "schemaVersion": "cet-agent-review-suggestion/1",
-  "runId": "78c4...",
-  "threadId": "78c4...",
-  "status": "completed",
-  "policy": "suggest_only",
-  "examId": "exam-20250821-012345abcdef",
-  "reviewRevision": 3,
-  "issueId": "answer-review:q26",
-  "proposals": [
-    {
-      "op": "replace",
-      "entity": "answer",
-      "questionId": "q26",
-      "field": "answer",
-      "value": "C",
-      "confidence": 0.84,
-      "evidenceSources": ["rag:exact:official_answer"]
-    }
-  ],
-  "rationale": "找到与问题题号一致的受限上下文证据，已生成一项待人工确认的替换建议。",
-  "evidence": [{"source": "rag:exact:official_answer", "questionId": "q26", "excerpt": "26. C"}],
-  "cautions": ["建议尚未写入；必须由人工复核工作台确认并通过当前 revision/ETag 发布。"],
-  "trace": {
-    "nodes": ["load_review_issue", "retrieve_review_evidence", "build_suggest_only_proposal", "suggestion_policy_guard", "finalize_review_suggestion"],
-    "durationMs": 5
-  }
-}
-```
-
-Only the current `issue.targetId` can appear in a proposal. Allowed question
-fields are `stem`, `type`, `page`, `bbox`, and `options`; allowed answer fields
-are `answer` and `explanation`. The first version generates only conservative
-`stem` or `answer` proposals. Empty `proposals` is the expected result when
-evidence is insufficient.
+Official framework reference: [LangGraph overview](https://docs.langchain.com/oss/python/langgraph/overview)
+and [persistence](https://docs.langchain.com/oss/python/langgraph/persistence).

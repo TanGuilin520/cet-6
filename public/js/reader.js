@@ -4,24 +4,24 @@
   const $ = (selector, context = document) => context.querySelector(selector);
   const $$ = (selector, context = document) => [...context.querySelectorAll(selector)];
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-  const builtInPapers = Object.freeze({
-    '2021-06-01': {
-      manifestUrl: '/api/papers/2021-06-01/manifest',
-      assetRoot: 'assets/papers/2021-06-set-01/',
-      sourceUrl: 'assets/papers/2021-06-set-01/source.pdf',
-      questionsUrl: '/api/papers/2021-06-01/questions',
-      answersUrl: '/api/papers/2021-06-01/answers',
-      assistantUrl: '/api/papers/2021-06-01/assistant',
-    },
-  });
-  const requestedPaperId = new URLSearchParams(location.search).get('paper') || '2021-06-01';
-  const paperId = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(requestedPaperId) ? requestedPaperId : '2021-06-01';
+  const requestedPaperId = new URLSearchParams(location.search).get('paper') || '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(requestedPaperId)) {
+    location.replace('upload.html');
+    return;
+  }
+  const paperId = requestedPaperId;
+  const RETURN_QUESTION_ID = /^(?:q[1-9][0-9]{0,2}|(?:writing|translation)-[1-9][0-9]{0,2})$/;
+  const requestedQuestion = new URLSearchParams(location.search).get('question') || '';
+  const requestedQuestionId = RETURN_QUESTION_ID.test(requestedQuestion) ? requestedQuestion : '';
+  const requestedPage = new URLSearchParams(location.search).get('page') || '';
+  const requestedPageNumber = /^[1-9][0-9]{0,2}$/.test(requestedPage) ? Number(requestedPage) : 0;
+  const requestedNote = new URLSearchParams(location.search).get('note') || '';
+  const requestedNoteId = requestedNote.length <= 160 && !requestedNote.includes('\0') ? requestedNote : '';
+  const writingLibraryLink = $('#open-writing-library');
+  if (writingLibraryLink) writingLibraryLink.href = writingTemplateUrl(requestedQuestionId);
+  const translationLibraryLink = $('#open-translation-library');
   const uploadedApiRoot = `/api/exams/${encodeURIComponent(paperId)}`;
-  const paperConfig = builtInPapers[paperId] ? {
-    id: paperId,
-    builtIn: true,
-    ...builtInPapers[paperId],
-  } : {
+  const paperConfig = {
     id: paperId,
     builtIn: false,
     manifestUrl: `${uploadedApiRoot}/manifest`,
@@ -34,9 +34,12 @@
   const manifestUrl = paperConfig.manifestUrl;
   const assetRoot = paperConfig.assetRoot;
   const storageKey = `exam-viewer:${paperId}:v1`;
+  const noteDraftKey = `${storageKey}:note-drafts`;
+  const MAX_NOTE_CHARS = 6000;
   const tools = new Set(['select', 'copy', 'line', 'highlight', 'eraser']);
   const tones = new Set(['amber', 'blue', 'green', 'purple']);
   const QUESTION_RAIL_WIDTH = 152;
+  const MODULE_ENTRY_OFFSET = 60;
   const MAX_TEMPLATE_FILE_BYTES = 64 * 1024;
   const MAX_TEMPLATE_SOURCE_CHARS = 12000;
   const MAX_LONG_ANSWER_CHARS = 12000;
@@ -55,6 +58,7 @@
   const tagLabelInput = $('#tag-label');
   const tagNoteInput = $('#tag-note');
   const tagDeleteButton = $('#delete-tag');
+  const selectionToolbar = $('#selection-toolbar');
   const questionWorkspace = $('#question-workspace');
   const questionNavigator = $('#question-navigator');
   const questionDetail = $('#question-detail');
@@ -112,7 +116,7 @@
     }
     if (type === 'tag') {
       base.label = String(item.label || '重点').trim().slice(0, 16) || '重点';
-      base.note = String(item.note || '').trim().slice(0, 260);
+      base.note = String(item.note || '').trim().slice(0, MAX_NOTE_CHARS);
       base.tone = tones.has(item.tone) ? item.tone : 'amber';
     }
     return base;
@@ -195,6 +199,8 @@
         nodes,
         durationMs: Number.isFinite(durationValue) && durationValue >= 0 ? Math.round(durationValue) : null,
       },
+      execution: window.AgentChat.normalizeExecution(value.execution),
+      memory: value.memory && value.memory.enabled === true ? { enabled: true, turns: Number.isInteger(value.memory.turns) && value.memory.turns >= 0 ? value.memory.turns : null, summaryPresent: value.memory.summaryPresent === true } : null,
     };
     return agent.runId || agent.intent || agent.tools.length || agent.trace.nodes.length || agent.trace.durationMs !== null
       ? agent
@@ -228,6 +234,7 @@
         if (agent) clean.agent = agent;
         if (generation) clean.generation = generation;
         if (citations.length) clean.citations = citations;
+        if (Array.isArray(message.learningCitations)) clean.learningCitations = message.learningCitations.slice(0, 12).filter((citation) => typeof citation?.title === 'string').map((citation) => ({ title: citation.title.slice(0, 160), kind: String(citation.kind || '').slice(0, 60), official: false }));
         if (message?.sourceBadge === 'official') clean.sourceBadge = 'official';
         else if (message?.sourceBadge === 'ai') clean.sourceBadge = 'ai';
       }
@@ -237,16 +244,24 @@
 
   function parseWritingTemplate(source, previousSlots = []) {
     const text = String(source || '').replace(/\0/g, '').slice(0, MAX_TEMPLATE_SOURCE_CHARS);
-    const previous = new Map((Array.isArray(previousSlots) ? previousSlots : []).map((slot) => [String(slot?.name || ''), String(slot?.value || '')]));
+    const previous = new Map((Array.isArray(previousSlots) ? previousSlots : []).map((slot) => [String(slot?.name || ''), slot]));
     const names = [];
-    text.replace(/\{\{\s*([^{}\r\n]{1,40}?)\s*\}\}/g, (match, rawName) => {
+    text.replace(/\{\{\s*([^{}\r\n]{1,80}?)\s*\}\}/g, (match, rawName) => {
       const name = String(rawName || '').trim();
       if (name && !names.includes(name) && names.length < 40) names.push(name);
       return match;
     });
     return {
       source: text,
-      slots: names.map((name) => ({ name, value: String(previous.get(name) || '').slice(0, 1000) })),
+      slots: names.map((name) => {
+        const oldSlot = previous.get(name);
+        return {
+          name,
+          value: String(oldSlot?.value || '').slice(0, 1000),
+          type: ['word', 'sentence'].includes(oldSlot?.type) ? oldSlot.type
+            : /句|段|sentence|paragraph/i.test(name) ? 'sentence' : 'word',
+        };
+      }),
     };
   }
 
@@ -256,10 +271,11 @@
     Object.entries(value).slice(0, 10).forEach(([questionId, template]) => {
       if (!/^(?:writing-|q)\d{1,3}$/.test(questionId) || !template || typeof template !== 'object') return;
       const parsed = parseWritingTemplate(template.source, template.slots || template.values);
-      if (!parsed.source || !parsed.slots.length) return;
+      if (!parsed.source) return;
       templates[questionId] = {
         version: 1,
         name: String(template.name || '写作模板.txt').slice(0, 160),
+        libraryId: String(template.libraryId || '').slice(0, 128),
         source: parsed.source,
         slots: parsed.slots,
         updatedAt: Number(template.updatedAt) || Date.now(),
@@ -286,16 +302,71 @@
     aiHistoryRevision: normalizeStoredRevision(stored.aiHistoryRevision),
     aiFreeHistory: normalizeStoredThread(stored.aiFreeHistory),
     aiSelectionHistory: normalizeStoredThread(stored.aiSelectionHistory),
+    aiConversations: window.AgentChat.normalizeConversations(stored.aiConversations),
     writingTemplates: normalizeStoredWritingTemplates(stored.writingTemplates),
     history: [],
+    redoHistory: [],
   };
+  let answerBaseline = { ...state.answers };
+  const answerConflicts = new Set();
+
+  function changedAnswerIds() {
+    return [...new Set([...Object.keys(answerBaseline), ...Object.keys(state.answers)])]
+      .filter((id) => (answerBaseline[id] || '') !== (state.answers[id] || ''));
+  }
+
+  function showAnswerConflict() {
+    const panel = $('#answer-sync-conflict');
+    if (panel) panel.hidden = !answerConflicts.size;
+  }
+
+  function syncWorkspaceAnswers() {
+    try {
+      const latest = window.LearningStore.readExam(paperId);
+      const incoming = normalizeStoredAnswers(latest.answers);
+      const dirtyIds = new Set(changedAnswerIds());
+      const previous = { ...state.answers };
+      const next = { ...incoming };
+      dirtyIds.forEach((id) => {
+        if ((incoming[id] || '') !== (answerBaseline[id] || '') && (incoming[id] || '') !== (state.answers[id] || '')) answerConflicts.add(id);
+        if (state.answers[id]) next[id] = state.answers[id]; else delete next[id];
+      });
+      Object.keys({ ...answerBaseline, ...incoming }).forEach((id) => { if (!dirtyIds.has(id)) { if (incoming[id]) answerBaseline[id] = incoming[id]; else delete answerBaseline[id]; } });
+      state.answers = next;
+      if (JSON.stringify(previous) !== JSON.stringify(next)) { state.submitted = false; state.grade = null; }
+      renderAllPageQuestions(); renderQuestionProgress(); renderQuestionNavigator(); renderExamResult();
+      if (!document.activeElement?.matches('[data-long-answer]')) renderQuestionDetail();
+      showAnswerConflict();
+    } catch (_error) { showToast('其他页面的作答暂时无法读取，当前输入仍保留。'); }
+  }
+
+  const noteDrafts = (() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(noteDraftKey) || '[]');
+      return (Array.isArray(saved) ? saved : []).flatMap((draft) => {
+        const source = normalizeAnnotation({ ...draft, type: 'tag', id: draft?.key });
+        if (!source) return [];
+        return [{ ...source, key: source.id, tagId: String(draft.tagId || ''),
+          label: String(draft.label ?? '重点').slice(0, 16),
+          note: String(draft.note || '').slice(0, MAX_NOTE_CHARS),
+          updatedAt: Number(draft.updatedAt) || source.createdAt }];
+      });
+    } catch { return []; }
+  })();
 
   let manifest = null;
   let fitScale = 1;
+  let appliedScale = null;
   let currentPage = 1;
+  let pageNavigationTarget = null;
   let activePointer = null;
   let erasedDuringGesture = [];
   let pendingSelection = null;
+  let selectionContext = null;
+  let selectionRange = null;
+  let noteDraftTimer = 0;
+  let annotationIndexDirty = true;
+  const annotationIndex = new Map();
   let pendingCopy = null;
   let activeTag = null;
   let activeTagTone = 'amber';
@@ -316,6 +387,8 @@
   let aiChatBusy = false;
   let aiCompositionActive = false;
   let aiActiveRequest = null;
+  let aiRuntime = null;
+  let aiResetBusy = false;
   const aiFailures = new Map();
   let aiPointerDownInsidePanel = false;
   const assistantPendingQuestions = new Set();
@@ -568,7 +641,18 @@
     clearTimeout(saveTimer);
     const persist = () => {
       try {
+        const latest = window.LearningStore.readExam(paperId);
+        const incoming = normalizeStoredAnswers(latest.answers);
+        const changes = changedAnswerIds();
+        const conflict = changes.filter((id) => (incoming[id] || '') !== (answerBaseline[id] || '') && (incoming[id] || '') !== (state.answers[id] || ''));
+        conflict.forEach((id) => answerConflicts.add(id));
+        showAnswerConflict();
+        if (conflict.length) throw new Error('answer conflict');
+        const mergedAnswers = { ...incoming };
+        changes.forEach((id) => { if (state.answers[id]) mergedAnswers[id] = state.answers[id]; else delete mergedAnswers[id]; });
+        if (JSON.stringify(incoming) !== JSON.stringify(answerBaseline)) { state.submitted = false; state.grade = null; }
         localStorage.setItem(storageKey, JSON.stringify({
+          ...latest,
           tool: state.tool,
           zoom: state.zoom,
           lineColor: state.lineColor,
@@ -576,7 +660,7 @@
           annotations: state.annotations,
           thumbnails: state.thumbnails,
           notesPanel: state.notesPanel,
-          answers: state.answers,
+          answers: mergedAnswers,
           flagged: [...state.flagged],
           currentQuestionId: state.currentQuestionId,
           submitted: state.submitted,
@@ -585,37 +669,42 @@
           aiHistoryRevision: state.aiHistoryRevision,
           aiFreeHistory: normalizeStoredThread(state.aiFreeHistory),
           aiSelectionHistory: normalizeStoredThread(state.aiSelectionHistory),
+          aiConversations: state.aiConversations,
           writingTemplates: normalizeStoredWritingTemplates(state.writingTemplates),
         }));
+        state.answers = mergedAnswers;
+        answerBaseline = { ...mergedAnswers };
         indicator?.classList.remove('is-saving');
         if (indicator) indicator.lastChild.textContent = ' 已自动保存';
+        return true;
       } catch {
         indicator?.classList.remove('is-saving');
         indicator?.classList.add('is-error');
         if (indicator) indicator.lastChild.textContent = ' 保存失败';
-        showToast('本地存储空间不足，当前标注未能保存');
+        showToast(answerConflicts.size ? '本题在其他窗口发生修改，已暂停覆盖。请在顶部选择保留哪一版。' : '本地资料无法写入，当前输入仍在页面中；请检查存储并备份');
+        return false;
       }
     };
-    if (immediate) persist();
+    if (immediate) return persist();
     else saveTimer = setTimeout(persist, 180);
   }
 
-  window.addEventListener('pagehide', () => save(true));
+  window.addEventListener('pagehide', () => {
+    rememberNoteDraft();
+    persistNoteDrafts();
+    save(true);
+  });
 
   function pushHistory(action) {
+    annotationIndexDirty = true;
     state.history.push(action);
     state.history = state.history.slice(-80);
+    state.redoHistory = [];
     updateToolbar();
   }
 
   function pageModule(pageNumber) {
-    if (!paperConfig.builtIn) return `试卷第 ${pageNumber} 页`;
-    if (pageNumber === 1) return '写作 · 听力 1–6';
-    if (pageNumber === 2) return '听力 7–17';
-    if (pageNumber === 3) return '听力 18–25 · 阅读';
-    if (pageNumber <= 5) return '阅读 Section A / B';
-    if (pageNumber <= 7) return '阅读 Section B / C';
-    return '阅读 51–55 · 翻译';
+    return `试卷第 ${pageNumber} 页`;
   }
 
   function updateToolbar() {
@@ -623,10 +712,14 @@
     $$('.tool-button[data-tool]').forEach((button) => button.setAttribute('aria-pressed', String(button.dataset.tool === state.tool)));
     const undo = $('#undo-mark');
     if (undo) undo.disabled = state.history.length === 0;
+    const redo = $('#redo-mark');
+    if (redo) redo.disabled = state.redoHistory.length === 0;
     const color = $('#line-color');
     if (color && color.value !== state.lineColor) color.value = state.lineColor;
     const highlightColor = $('#highlight-color');
     if (highlightColor && highlightColor.value !== state.highlightColor) highlightColor.value = state.highlightColor;
+    const selectionColor = $('#selection-highlight-color');
+    if (selectionColor && selectionColor.value !== state.highlightColor) selectionColor.value = state.highlightColor;
     viewer.style.setProperty('--active-highlight-color', state.highlightColor);
     viewer.classList.toggle('is-thumbnails-hidden', !state.thumbnails);
     viewer.classList.toggle('is-notes-hidden', !state.notesPanel);
@@ -634,7 +727,7 @@
     $('#toggle-notes')?.setAttribute('aria-pressed', String(state.notesPanel));
     const guide = $('#tool-guide');
     const guideText = {
-      select: ['查词 / 选段标签', '单击单词可查中文释义并朗读；拖选一段文字可记录标签。'],
+      select: ['查词 / 选段笔记', '单击查词；拖选文字后可复制、高亮、记笔记或问 AI。'],
       copy: ['选段复制', '拖选 PDF 文字，在确认面板中复制为纯文本。'],
       line: ['直线工具', '按下确定起点，拖动预览，松开得到笔直线段。'],
       highlight: ['矩形荧光笔', '拖选文字后按每行文字边界生成规整长方形。'],
@@ -661,6 +754,8 @@
     const textLayer = document.createElement('div');
     const badgeLayer = document.createElement('div');
     const questionLayer = document.createElement('div');
+    const moduleEntryLayer = makeElement('nav', 'page-module-entry-layer');
+    moduleEntryLayer.setAttribute('aria-label', `第 ${page.number} 页对应题型入口`);
     const pageBadge = document.createElement('span');
 
     shell.className = 'pdf-page-shell';
@@ -706,12 +801,13 @@
       wordFragment.append(span);
     });
     textLayer.append(wordFragment);
-    surface.append(image, markup, textLayer, badgeLayer, questionLayer, pageBadge);
+    surface.append(image, markup, textLayer, badgeLayer, questionLayer, moduleEntryLayer, pageBadge);
     shell.append(surface);
     pagesNode.append(shell);
 
-    const view = { page, shell, surface, image, markup, textLayer, badgeLayer, questionLayer };
+    const view = { page, shell, surface, image, markup, textLayer, badgeLayer, questionLayer, moduleEntryLayer, moduleHeadings: detectModuleHeadings(page) };
     pageViews.set(page.number, view);
+    renderModuleEntries(view);
     attachMarkupEvents(view);
     return view;
   }
@@ -741,22 +837,59 @@
   function calculateFitScale() {
     if (!manifest || !viewport) return 1;
     const available = Math.max(280, viewport.clientWidth - (innerWidth <= 680 ? 16 : 70));
-    const hasRail = questions.some((question) => manifest.pages.some((page) => question.page === page.number));
-    const widestPage = Math.max(...manifest.pages.map((page) => page.width)) + (hasRail ? QUESTION_RAIL_WIDTH : 0);
-    return clamp(available / widestPage, .35, 1.36);
+    const hasEntries = [...pageViews.values()].some((view) => view.moduleEntryLayer.childElementCount);
+    const hasRail = questions.length > 0 || hasEntries;
+    const widestPage = Math.max(...manifest.pages.map((page) => page.width));
+    const fit = available / (widestPage + (hasRail ? QUESTION_RAIL_WIDTH * 2 : 0));
+    // Reserve a readable module button plus the question-control column on
+    // both sides, without making "fit width" overflow on narrow screens.
+    const entryFit = hasEntries ? (available - 88) / (widestPage + 2 * (MODULE_ENTRY_OFFSET + 6)) : fit;
+    return clamp(Math.min(fit, entryFit), .35, 1.36);
   }
 
   function applyScale() {
     if (!manifest) return;
+    // Anchor the visible page position before changing dimensions. Browser
+    // scroll anchoring is disabled here so it cannot fight this calculation.
+    const viewportTop = viewport.getBoundingClientRect().top;
+    const centerY = viewportTop + viewport.clientHeight / 2;
+    let anchor = null;
+    if (appliedScale !== null) {
+      let nearestDistance = Infinity;
+      pageViews.forEach((view) => {
+        const rect = view.surface.getBoundingClientRect();
+        if (!rect.height) return;
+        const pointY = clamp(centerY, rect.top, rect.bottom);
+        const distance = Math.abs(pointY - centerY);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          anchor = { view, ratio: (pointY - rect.top) / rect.height, screenY: pointY - viewportTop };
+        }
+      });
+    }
     fitScale = calculateFitScale();
     const totalScale = fitScale * state.zoom;
-    pageViews.forEach(({ page, shell, surface }) => {
-      const railWidth = questions.length ? QUESTION_RAIL_WIDTH : 0;
-      shell.style.width = `${(page.width + railWidth) * totalScale}px`;
+    const hasModuleEntries = [...pageViews.values()].some((view) => view.moduleEntryLayer.childElementCount);
+    const hasRail = questions.length > 0 || hasModuleEntries;
+    const railWidth = hasRail ? Math.max(QUESTION_RAIL_WIDTH, hasModuleEntries ? 44 / totalScale + MODULE_ENTRY_OFFSET + 6 : 0) : 0;
+    pageViews.forEach((view) => {
+      const { page, shell, surface } = view;
+      // Center the original PDF, not the PDF plus a one-sided question rail.
+      shell.style.width = `${(page.width + railWidth * 2) * totalScale}px`;
       shell.style.height = `${page.height * totalScale}px`;
       surface.style.left = `${railWidth * totalScale}px`;
+      surface.style.top = '0px';
       surface.style.transform = `scale(${totalScale})`;
+      sizeModuleEntries(view, totalScale, railWidth);
     });
+    appliedScale = totalScale;
+    // Keep overflow scrollable in both directions while showing its midpoint
+    // after zoom or viewport changes. Manual panning remains available.
+    viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+    if (anchor) {
+      const rect = anchor.view.surface.getBoundingClientRect();
+      viewport.scrollTop += rect.top + rect.height * anchor.ratio - viewportTop - anchor.screenY;
+    }
     const zoom = $('#zoom-value');
     if (zoom) zoom.textContent = state.zoom === 1 ? '适合宽度' : `${Math.round(state.zoom * 100)}%`;
   }
@@ -766,6 +899,101 @@
     if (className) element.className = className;
     if (text !== '') element.textContent = text;
     return element;
+  }
+
+  function moduleWorkspaceUrl(module, questionId = '', pageNumber = 0) {
+    const params = new URLSearchParams({ paper: paperId });
+    if (RETURN_QUESTION_ID.test(questionId)) params.set('question', questionId);
+    if (Number.isInteger(pageNumber) && pageNumber > 0 && pageNumber < 1000) params.set('page', String(pageNumber));
+    return `${module === 'translation' ? 'translation' : 'writing'}.html?${params}`;
+  }
+
+  function writingTemplateUrl(questionId = '', pageNumber = 0) {
+    return moduleWorkspaceUrl('writing', questionId, pageNumber);
+  }
+
+  function detectModuleHeadings(page) {
+    const lines = new Map();
+    (page.words || []).forEach((word) => {
+      if (!Number.isFinite(Number(word.x)) || !Number.isFinite(Number(word.y)) || Number(word.y) < 0 || Number(word.y) >= page.height) return;
+      const key = word.line !== undefined && word.line !== null ? String(word.line) : `y:${Math.round(Number(word.y) / 3)}`;
+      if (!lines.has(key)) lines.set(key, []);
+      lines.get(key).push(word);
+    });
+    const headings = [];
+    lines.forEach((words) => {
+      const text = words.sort((a, b) => Number(a.x) - Number(b.x)).map((word) => String(word.text || '').trim()).join(' ').replace(/\s+/g, ' ').trim();
+      const match = /^(?:(?:part|section)\s*[ivx\d]+\s*[-:.)]?\s*)?(writing|translation|写作|作文|翻译)(?:\s*[\[(（]\s*\d{1,3}\s*(?:minutes?|mins?|分钟)\s*[\])）])?\s*$/i.exec(text);
+      if (!match) return;
+      const module = /^(translation|翻译)$/i.test(match[1]) ? 'translation' : 'writing';
+      headings.push({ module, y: Math.min(...words.map((word) => Number(word.y))), questionId: '' });
+    });
+    return headings;
+  }
+
+  function renderModuleEntries(view) {
+    const entries = [];
+    ['writing', 'translation'].forEach((module) => {
+      const matches = questions.filter((question) => question.page === view.page.number && question.type === module);
+      const located = matches.filter((question) => question.bbox && question.bbox.y >= 0 && question.bbox.y < view.page.height);
+      if (located.length) located.forEach((question) => entries.push({ module, y: question.bbox.y, questionId: question.id }));
+      else {
+        const headings = view.moduleHeadings.filter((heading) => heading.module === module);
+        headings.forEach((heading) => entries.push({ ...heading, questionId: matches.length === 1 && headings.length === 1 ? matches[0].id : '' }));
+      }
+    });
+    view.moduleEntryLayer.replaceChildren(...entries.map((entry) => {
+      const label = entry.module === 'writing' ? '进入作文模板' : '翻译方法与笔记';
+      // Without a parsed writing question there is no numbered control in
+      // the inner rail. Put its real heading shortcut beside the paper edge.
+      const headingWriting = entry.module === 'writing' && !entry.questionId;
+      const link = makeElement('a', `page-module-link page-module-link--${entry.module}${headingWriting ? ' page-module-link--writing-heading' : ''}`, `${label} →`);
+      link.dataset.openPageModule = entry.module;
+      link.dataset.sourcePage = String(view.page.number);
+      link.dataset.moduleQuestion = entry.questionId;
+      link.dataset.moduleY = String(entry.y);
+      if (entry.questionId) {
+        if (entry.module === 'writing') link.dataset.openWritingTemplate = entry.questionId;
+        else link.dataset.openTranslationTemplate = entry.questionId;
+      }
+      link.href = moduleWorkspaceUrl(entry.module, entry.questionId, view.page.number);
+      link.style.top = `${entry.y}px`;
+      link.setAttribute('aria-label', `${label}，第 ${view.page.number} 页${entry.questionId ? '，当前题目' : ''}`);
+      link.title = label;
+      return link;
+    }));
+    if (appliedScale !== null) sizeModuleEntries(view, appliedScale);
+  }
+
+  function sizeModuleEntries(view, scale, railWidth = Math.max(QUESTION_RAIL_WIDTH, 44 / scale + MODULE_ENTRY_OFFSET + 6)) {
+    const layer = view.moduleEntryLayer;
+    layer.style.setProperty('--module-link-offset', `${MODULE_ENTRY_OFFSET}px`);
+    layer.style.setProperty('--module-link-height', `${36 / scale}px`);
+    layer.style.setProperty('--module-link-font', `${11 / scale}px`);
+    layer.style.setProperty('--module-link-padding', `${3 / scale}px`);
+    const linkWidth = Math.max(44, (railWidth - MODULE_ENTRY_OFFSET - 6) * scale);
+    layer.style.setProperty('--module-link-width', `${linkWidth / scale}px`);
+    $$('[data-open-page-module]', layer).forEach((link) => {
+      const writing = link.dataset.openPageModule === 'writing';
+      const headingWriting = link.classList.contains('page-module-link--writing-heading');
+      const physicalWidth = headingWriting ? Math.min(80, Math.max(44, railWidth * scale - 8)) : linkWidth;
+      if (headingWriting) {
+        link.style.right = `calc(100% + ${8 / scale}px)`;
+        link.style.width = `${physicalWidth / scale}px`;
+      }
+      link.textContent = physicalWidth >= 125 ? (writing ? '进入作文模板 →' : '翻译方法与笔记 →')
+        : physicalWidth >= 52 ? (writing ? '作文模板' : '翻译方法') : (writing ? '作文' : '翻译');
+    });
+  }
+
+  function updateModuleHeaderLinks() {
+    [['writing', writingLibraryLink], ['translation', translationLibraryLink]].forEach(([module, link]) => {
+      if (!link) return;
+      const active = questions.find((question) => question.id === state.currentQuestionId && question.type === module);
+      const question = active || questions.find((item) => item.page === currentPage && item.type === module);
+      link.dataset.moduleQuestion = question?.id || '';
+      link.href = moduleWorkspaceUrl(module, question?.id || '', question?.page || currentPage);
+    });
   }
 
   function setQuestionStateClasses(element, status) {
@@ -779,6 +1007,7 @@
   function renderPageQuestions(pageNumber) {
     const view = pageViews.get(pageNumber);
     if (!view?.questionLayer) return;
+    renderModuleEntries(view);
     view.questionLayer.replaceChildren();
     const pageQuestions = questions.filter((question) => question.page === pageNumber).sort((left, right) => {
       const leftY = Number.isFinite(left.bbox?.y) ? left.bbox.y : Number.POSITIVE_INFINITY;
@@ -795,6 +1024,7 @@
       const expanded = expandedQuestionId === question.id;
 
       const card = makeElement('div', `page-question-card${expanded ? ' is-expanded' : ''}`);
+      if (!question.objective && ['writing', 'translation'].includes(question.type)) card.classList.add('is-module-question');
       card.dataset.questionId = question.id;
       card.dataset.questionAnchor = question.id;
       card.setAttribute('role', 'group');
@@ -803,14 +1033,22 @@
       const desiredTop = bbox ? bbox.y : 18 + index * 30;
       card.style.right = 'calc(100% + 5px)';
 
-      const numberButton = makeElement('button', 'page-question-number', question.number);
-      numberButton.type = 'button';
-      numberButton.disabled = controlsDisabled;
+      const directTranslation = question.type === 'translation';
+      const numberButton = makeElement(directTranslation ? 'a' : 'button', 'page-question-number', question.number);
       numberButton.setAttribute('data-toggle-page-question', question.id);
-      numberButton.setAttribute('aria-expanded', String(expanded));
-      numberButton.setAttribute('aria-label', `${expanded ? '收起' : '展开'}${questionLabel(question)}答案选项`);
+      if (directTranslation) {
+        numberButton.href = moduleWorkspaceUrl('translation', question.id, question.page);
+        numberButton.dataset.openTranslationTemplate = question.id;
+        numberButton.setAttribute('aria-label', `进入${questionLabel(question)}翻译工作台`);
+        numberButton.title = '直接进入翻译工作台，查看原文和自己的学习方法';
+      } else {
+        numberButton.type = 'button';
+        numberButton.disabled = controlsDisabled;
+        numberButton.setAttribute('aria-expanded', String(expanded));
+        numberButton.setAttribute('aria-label', `${expanded ? '收起' : '展开'}${questionLabel(question)}答案选项`);
+        numberButton.title = expanded ? `收起${questionLabel(question)}选项` : `选择${questionLabel(question)}答案`;
+      }
       numberButton.dataset.answer = question.objective ? selected : status.answered ? '✓' : '';
-      numberButton.title = expanded ? `收起${questionLabel(question)}选项` : `选择${questionLabel(question)}答案`;
       card.append(numberButton);
 
       if (expanded && question.objective) {
@@ -920,7 +1158,7 @@
 
   function compileWritingTemplate(template, showPlaceholders = true) {
     if (!template) return '';
-    return String(template.source || '').replace(/\{\{\s*([^{}\r\n]{1,40}?)\s*\}\}/g, (match, rawName) => {
+    return String(template.source || '').replace(/\{\{\s*([^{}\r\n]{1,80}?)\s*\}\}/g, (match, rawName) => {
       const name = String(rawName || '').trim();
       const slot = template.slots.find((item) => item.name === name);
       const value = String(slot?.value || '').trim();
@@ -956,6 +1194,37 @@
     header.append(heading, uploadButton, fileInput);
     builder.append(header);
 
+    const libraryControls = makeElement('div', 'writing-template-library-controls');
+    const libraryLabel = makeElement('label', '', '使用我的模板库');
+    const librarySelect = document.createElement('select');
+    librarySelect.dataset.writingLibrarySelect = question.id;
+    librarySelect.setAttribute('aria-label', '选择我的作文模板');
+    const placeholder = makeElement('option', '', '请选择已保存的模板');
+    placeholder.value = '';
+    librarySelect.append(placeholder);
+    let libraryTemplates = [];
+    try { libraryTemplates = typeof WritingTemplates !== 'undefined' ? WritingTemplates.list() : []; }
+    catch { /* File import remains available if the library is unavailable. */ }
+    libraryTemplates.forEach((entry) => {
+      const option = makeElement('option', '', entry.name);
+      option.value = entry.id;
+      librarySelect.append(option);
+    });
+    if (template?.libraryId && libraryTemplates.some((entry) => entry.id === template.libraryId)) {
+      librarySelect.value = template.libraryId;
+    }
+    librarySelect.disabled = libraryTemplates.length === 0;
+    const useTemplate = makeElement('button', '', '使用此模板');
+    useTemplate.type = 'button';
+    useTemplate.dataset.useWritingLibraryTemplate = question.id;
+    useTemplate.disabled = !librarySelect.value;
+    const manageLink = makeElement('a', '', libraryTemplates.length ? '打开作文模板库' : '创建我的作文模板');
+    manageLink.href = writingTemplateUrl(question.id);
+    manageLink.dataset.openWritingTemplate = question.id;
+    libraryLabel.append(librarySelect);
+    libraryControls.append(libraryLabel, useTemplate, manageLink);
+    builder.append(libraryControls);
+
     if (!template) {
       builder.append(makeElement('p', 'writing-template-preview', ''));
       return builder;
@@ -965,7 +1234,7 @@
     template.slots.forEach((slot, index) => {
       const field = makeElement('div', 'writing-template-slot');
       const label = makeElement('label', 'writing-template-slot-label', slot.name);
-      const input = document.createElement(slot.value.length > 90 ? 'textarea' : 'input');
+      const input = document.createElement(slot.type === 'sentence' || slot.value.length > 90 || /[\r\n]/.test(slot.value) ? 'textarea' : 'input');
       if (input instanceof HTMLInputElement) input.type = 'text';
       input.value = slot.value;
       input.maxLength = 1000;
@@ -988,10 +1257,96 @@
     const apply = makeElement('button', '', state.answers[question.id] ? '重新应用到作文' : '应用到作文');
     apply.type = 'button';
     apply.dataset.applyWritingTemplate = question.id;
-    actions.append(clear, apply);
+    const saveToLibrary = makeElement('button', '', '另存到我的模板库');
+    saveToLibrary.type = 'button';
+    saveToLibrary.dataset.saveWritingLibraryTemplate = question.id;
+    actions.append(saveToLibrary, clear, apply);
     builder.append(actions);
     return builder;
   }
+
+  function useWritingLibraryTemplate(questionId) {
+    const select = $('[data-writing-library-select]', questionDetail);
+    if (!select?.value || typeof WritingTemplates === 'undefined') return;
+    try {
+      const template = WritingTemplates.get(select.value);
+      if (!template) { showToast('模板已被删除，请重新选择'); renderQuestionDetail(); return; }
+      const previous = state.writingTemplates[questionId];
+      if (previous && !window.confirm('替换本题的模板和填空内容吗？当前作文不会改变。')) return;
+      const parsed = parseWritingTemplate(template.source, template.slots);
+      state.writingTemplates[questionId] = {
+        version: 1, name: template.name, libraryId: template.id,
+        source: parsed.source, slots: parsed.slots, updatedAt: Date.now(), lastAppliedAt: 0,
+      };
+      if (!save(true)) {
+        if (previous) state.writingTemplates[questionId] = previous;
+        else delete state.writingTemplates[questionId];
+        return;
+      }
+      renderQuestionDetail();
+      showToast('模板已载入本题，填空不会修改模板库；确认成稿后再应用到作文');
+    } catch (error) { showToast(error.message || '暂时无法读取模板库'); }
+  }
+
+  function saveWritingTemplateToLibrary(questionId) {
+    const template = state.writingTemplates[questionId];
+    if (!template || typeof WritingTemplates === 'undefined') return;
+    try {
+      WritingTemplates.save({ name: template.name, source: template.source, slots: template.slots });
+      renderQuestionDetail();
+      showToast('已另存为新模板，可在其他试卷复用，原模板不会被覆盖');
+    } catch (error) { showToast(error.message || '模板保存失败，当前内容仍然保留'); }
+  }
+
+  function refreshWritingLibrarySelector() {
+    const select = $('[data-writing-library-select]', questionDetail);
+    if (!select || typeof WritingTemplates === 'undefined') return;
+    const selectedId = select.value;
+    const useButton = $('[data-use-writing-library-template]', questionDetail);
+    try {
+      const templates = WritingTemplates.list();
+      const placeholder = makeElement('option', '', '请选择已保存的模板');
+      placeholder.value = '';
+      select.replaceChildren(placeholder, ...templates.map((template) => {
+        const option = makeElement('option', '', template.name);
+        option.value = template.id;
+        return option;
+      }));
+      if (templates.some((template) => template.id === selectedId)) select.value = selectedId;
+      select.disabled = !templates.length;
+      const link = select.closest('.writing-template-library-controls')?.querySelector('a');
+      if (link) link.textContent = templates.length ? '打开作文模板库' : '创建我的作文模板';
+    } catch {
+      select.disabled = true;
+    }
+    if (useButton) useButton.disabled = select.disabled || !select.value;
+  }
+
+  // A second tab or the browser back/forward cache may update the library.
+  // Refresh only its selector, leaving the current answer and input focus alone.
+  window.addEventListener('storage', (event) => {
+    if (event.key === 'cet:writing-template-library:v1') refreshWritingLibrarySelector();
+    if (event.key === storageKey) syncWorkspaceAnswers();
+  });
+  $('#answer-conflict-use-current')?.addEventListener('click', () => {
+    if (!confirm('确认用本页尚未保存的答案覆盖这些冲突题目的另一窗口版本？其他题目不会更改。')) return;
+    try {
+      const latest = window.LearningStore.readExam(paperId);
+      answerConflicts.forEach((id) => { if (latest.answers?.[id]) answerBaseline[id] = latest.answers[id]; else delete answerBaseline[id]; });
+      answerConflicts.clear(); showAnswerConflict(); save(true);
+    } catch (_error) { showToast('本机作答无法读取，未执行覆盖。'); }
+  });
+  $('#answer-conflict-use-saved')?.addEventListener('click', () => {
+    if (!confirm('确认采用已经保存的另一窗口版本？本页这些冲突题目的未保存输入将替换，其他题目保持不变。')) return;
+    try {
+      const latest = window.LearningStore.readExam(paperId);
+      answerConflicts.forEach((id) => { if (latest.answers?.[id]) state.answers[id] = answerBaseline[id] = latest.answers[id]; else { delete state.answers[id]; delete answerBaseline[id]; } });
+      answerConflicts.clear(); showAnswerConflict(); renderQuestionInterface(); save(true);
+    } catch (_error) { showToast('本机作答无法读取，当前输入未改变。'); }
+  });
+  window.addEventListener('pageshow', syncWorkspaceAnswers);
+  window.addEventListener('pageshow', refreshWritingLibrarySelector);
+  window.addEventListener('focus', refreshWritingLibrarySelector);
 
   async function importWritingTemplate(questionId, file) {
     if (!file) return;
@@ -1119,6 +1474,12 @@
       questionDetail.append(options);
     } else {
       if (/writing/.test(question.type)) questionDetail.append(renderWritingTemplateBuilder(question));
+      if (question.type === 'translation') {
+        const link = makeElement('a', 'question-method-entry', '翻译方法与对照笔记 →');
+        link.dataset.openTranslationTemplate = question.id;
+        link.href = moduleWorkspaceUrl('translation', question.id, question.page);
+        questionDetail.append(link);
+      }
       const textarea = makeElement('textarea', 'question-long-answer');
       textarea.dataset.longAnswer = question.id;
       textarea.maxLength = MAX_LONG_ANSWER_CHARS;
@@ -1182,6 +1543,7 @@
   function renderQuestionInterface() {
     if (!questions.length) return;
     if (!questions.some((question) => question.id === state.currentQuestionId)) state.currentQuestionId = questions[0].id;
+    updateModuleHeaderLinks();
     renderAllPageQuestions();
     renderQuestionProgress();
     renderQuestionNavigator();
@@ -1222,11 +1584,11 @@
   }
 
   function openQuestionPanel() {
-    if (!questionWorkspace || questionWorkspace.hidden) return;
+    if (!$('#annotation-sidebar')) return;
     if (!matchMedia('(max-width: 900px)').matches) {
       state.notesPanel = true;
       updateToolbar();
-      questionWorkspace.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      (questionWorkspace?.hidden ? $('.tag-records') : questionWorkspace)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       save();
       return;
     }
@@ -1243,10 +1605,19 @@
     renderQuestionInterface();
     jumpToPage(question.page, smooth);
     setTimeout(() => {
+      if (state.currentQuestionId !== question.id) return;
       const view = pageViews.get(question.page);
       const anchor = view && $$('[data-question-anchor]', view.questionLayer).find((element) => element.dataset.questionAnchor === question.id);
-      anchor?.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'center', inline: 'nearest' });
-      anchor?.querySelector('button')?.focus({ preventScroll: true });
+      if (anchor) {
+        const rect = anchor.getBoundingClientRect();
+        const viewportRect = viewport.getBoundingClientRect();
+        viewport.scrollTo({
+          top: viewport.scrollTop + rect.top + rect.height / 2 - viewportRect.top - viewport.clientTop - viewport.clientHeight / 2,
+          left: viewport.scrollLeft,
+          behavior: smooth ? 'smooth' : 'auto',
+        });
+      }
+      anchor?.querySelector('[data-toggle-page-question]')?.focus({ preventScroll: true });
     }, smooth ? 280 : 0);
     if (matchMedia('(max-width: 900px)').matches) closeQuestionPanel();
     save();
@@ -1323,13 +1694,22 @@
       }
       const validIds = new Set(questions.map((question) => question.id));
       state.flagged = new Set([...state.flagged].filter((id) => validIds.has(id)));
+      const returnQuestion = requestedQuestionId && validIds.has(requestedQuestionId) ? requestedQuestionId : '';
+      if (returnQuestion) state.currentQuestionId = returnQuestion;
       if (!validIds.has(state.currentQuestionId)) state.currentQuestionId = questions[0].id;
       questionWorkspace.hidden = false;
       $('#toggle-question-panel').hidden = false;
       if ($('#toggle-question-panel').firstChild) $('#toggle-question-panel').firstChild.textContent = '答题 ';
       $$('[data-question-only]', questionWorkspace).forEach((element) => { element.hidden = false; });
+      renderAllPageQuestions();
       applyScale();
       renderQuestionInterface();
+      if (returnQuestion) {
+        jumpToQuestion(returnQuestion, false);
+        // jumpToQuestion locates the page asynchronously; open the matching
+        // answer workspace after that, including its mobile overlay.
+        setTimeout(openQuestionPanel, 0);
+      }
       $$('.thumbnail-button').forEach((button) => {
         const pageNumber = Number(button.dataset.thumbnailPage);
         const pageQuestions = questions.filter((question) => question.page === pageNumber);
@@ -1436,9 +1816,15 @@
     panel.prepend(banner);
   }
 
-  fetch('/api/exams/capabilities', { headers: { Accept: 'application/json' } })
-    .then((response) => { if (!response.ok) aiShowServerBanner(); })
-    .catch(() => aiShowServerBanner());
+  function refreshAiRuntimeUi() {
+    const status = $('#ai-runtime-status');
+    if (status) status.textContent = window.AgentChat.runtimeLabel(aiRuntime, aiScope);
+  }
+  window.AgentChat.runtime().then((runtime) => {
+    aiRuntime = runtime;
+    refreshAiRuntimeUi();
+    if (!runtime) aiShowServerBanner();
+  });
 
   const AI_SOURCE_BADGES = {
     official: { label: '含官方解析', className: 'ai-source-chip--official' },
@@ -1559,6 +1945,14 @@
   }
 
   function appendAssistantMetadata(container, message) {
+    const learningCitations = (Array.isArray(message?.learningCitations) ? message.learningCitations : []).slice(0, 12);
+    if (learningCitations.length) {
+      const details = document.createElement('details');
+      details.append(makeElement('summary', '', '学习方法依据（非官方资料）'));
+      const list = document.createElement('ul');
+      learningCitations.forEach((citation) => { if (typeof citation?.title === 'string') list.append(makeElement('li', '', citation.title.slice(0, 160))); });
+      details.append(list); container.append(details);
+    }
     const citations = normalizeAiCitations(message?.citations);
     if (citations.length) {
       const details = document.createElement('details');
@@ -1599,6 +1993,13 @@
       }
     }
     if (agent.runId) list.append(makeElement('li', '', `Run ID：${agent.runId}`));
+    if (agent.execution) {
+      if (agent.execution.mode) list.append(makeElement('li', '', `执行方式：${agent.execution.mode === 'dynamic_tools' ? '模型选择只读工具' : '确定性流程'}`));
+      if (agent.execution.rounds !== null) list.append(makeElement('li', '', `工具决策轮数：${agent.execution.rounds}`));
+      if (agent.execution.toolCalls !== null) list.append(makeElement('li', '', `实际工具调用次数：${agent.execution.toolCalls}`));
+      if (agent.execution.stopReason) list.append(makeElement('li', '', `结束原因：${agent.execution.stopReason}`));
+    }
+    if (agent.memory?.enabled) list.append(makeElement('li', '', `会话记忆：${agent.memory.turns ?? '-'} 轮${agent.memory.summaryPresent ? ' · 含历史摘要' : ''}`));
     agent.tools.forEach((tool) => {
       const status = tool.status ? `（${tool.status}）` : '';
       const summary = tool.summary ? ` — ${tool.summary}` : '';
@@ -1645,17 +2046,20 @@
       status.classList.toggle('is-error', Boolean(failure) && !aiChatBusy);
       status.textContent = aiChatBusy
         ? (aiActiveRequest?.key === key
-          ? '正在整理回答，请稍候。你可以继续编辑下一条问题。'
+          ? aiActiveRequest.progress || '请求已发送，等待服务回复。你可以继续编辑下一条问题。'
           : '其他会话的问题正在回复，完成后可返回对应会话查看。')
         : failure?.notice || '';
     }
     const sendButton = $('#ai-send-button');
     if (sendButton) {
-      sendButton.disabled = aiChatBusy;
+      sendButton.disabled = aiChatBusy || aiResetBusy;
       sendButton.textContent = aiChatBusy ? '正在回复…' : '发送问题';
     }
     const newChat = $('#ai-new-chat');
-    if (newChat) newChat.disabled = aiChatBusy;
+    if (newChat) newChat.disabled = aiChatBusy || aiResetBusy;
+    const stop = $('#ai-stop-reply');
+    if (stop) { stop.hidden = !aiChatBusy; stop.disabled = aiActiveRequest?.cancelled === true; }
+    refreshAiRuntimeUi();
     aiQuestionPanel?.setAttribute('aria-busy', String(aiChatBusy));
   }
 
@@ -1698,8 +2102,14 @@
       }
       aiQuestionMessages.append(container);
     });
-    if (aiChatBusy && aiActiveRequest?.key === aiThreadKey()) {
-      aiQuestionMessages.append(makeElement('p', 'ai-question-message is-pending', '正在结合上下文整理回答…'));
+    const transient = aiChatBusy && aiActiveRequest?.key === aiThreadKey() ? aiActiveRequest : aiFailures.get(aiThreadKey());
+    if (transient?.partial) {
+      const partial = makeElement('article', 'ai-question-message ai-stream-partial');
+      partial.append(makeElement('small', '', aiChatBusy ? '正在接收回复（尚未完成）' : '未完成的回复，仅临时展示，不计入对话历史'));
+      partial.append(makeElement('pre', 'ai-stream-text', /^[\s`]*(?:json\s*)?[{\[]/i.test(transient.partial) ? '正在接收结构化响应，等待完整结果…' : transient.partial));
+      aiQuestionMessages.append(partial);
+    } else if (aiChatBusy && aiActiveRequest?.key === aiThreadKey()) {
+      aiQuestionMessages.append(makeElement('p', 'ai-question-message is-pending', '等待服务返回进度与结果…'));
     }
     refreshAiRequestUi();
     aiQuestionMessages.scrollTop = aiQuestionMessages.scrollHeight;
@@ -1865,6 +2275,7 @@
       showToast('当前试卷未启用 AI 助手');
       return;
     }
+    if (tagEditor?.classList.contains('is-visible')) closeTagEditor();
     const question = questions.find((item) => item.id === questionId) || currentQuestion();
     if (question) state.currentQuestionId = question.id;
     else setAiScope('general', { silent: true, rerender: false });
@@ -1929,6 +2340,7 @@
   }
 
   function aiFailureNotice(error) {
+    if (error?.cancelled) return '已停止生成。未完成内容仅临时展示，你的问题仍保留。已发出的模型请求可能仍产生费用；停止不会自动重试。';
     const reasons = {
       not_configured: '尚未配置 AI 服务，请完成服务器的 API 配置后重试。',
       invalid_configuration: 'AI 服务配置有误，请检查服务器的模型和连接设置后重试。',
@@ -1972,7 +2384,7 @@
     const selectedText = requestScope === 'selection' ? (retryContext?.selectedText ?? aiSelectionText).slice(0, SELECTED_TEXT_MAX) : '';
     const question = questions.find((item) => item.id === requestQuestionId);
     const cleanMessage = String(message || '').trim().slice(0, 2000);
-    if (!cleanMessage || aiChatBusy || !paperConfig.assistantUrl) return;
+    if (!cleanMessage || aiChatBusy || aiResetBusy || !paperConfig.assistantUrl) return;
     if (requestScope === 'question') {
       if (!question || !paperConfig.assistantUrl || assistantPendingQuestions.has(question.id)) return;
     }
@@ -1985,7 +2397,7 @@
     const key = aiThreadKey(requestScope, requestQuestionId);
     const requestIdBase = ++assistantRequestId;
     const requestContext = {
-      key, scope: requestScope, questionId: requestQuestionId, selectedText, message: cleanMessage,
+      key, scope: requestScope, questionId: requestQuestionId, selectedText, message: cleanMessage, partial: '', progress: '', cancelled: false,
     };
     rememberAiDraft();
     const inputAtSend = aiQuestionDrafts.get(key) || '';
@@ -2001,6 +2413,7 @@
     save();
 
     const controller = new AbortController();
+    requestContext.controller = controller;
     const timeout = setTimeout(() => controller.abort(), 90_000);
     try {
       let body;
@@ -2009,31 +2422,26 @@
         const requestRevision = questionDataRevision;
         if (Number.isInteger(requestRevision) && requestRevision >= 0) body.reviewRevision = requestRevision;
         const userAnswer = String(state.answers[question.id] || '').trim();
-        if (userAnswer) body.userAnswer = userAnswer.slice(0, 100);
+        if (userAnswer) body.userAnswer = userAnswer.slice(0, ['writing', 'translation'].includes(question.type) ? MAX_LONG_ANSWER_CHARS : 100);
       } else if (requestScope === 'selection') {
         body = { scope: 'selection', selectedText, message: cleanMessage, history, requestId: `reader-${requestIdBase}` };
       } else {
         body = { scope: 'general', message: cleanMessage, history, requestId: `reader-${requestIdBase}` };
       }
 
-      const response = await fetch(paperConfig.assistantUrl, {
-        method: 'POST',
-        signal: controller.signal,
-        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-        body: encodeAiRequest(body),
+      body.conversationId = state.aiConversations[key] = window.AgentChat.conversationId(state.aiConversations[key]);
+      save();
+      const data = await window.AgentChat.request({ url: paperConfig.assistantUrl, body: encodeAiRequest(body), signal: controller.signal,
+        onProgress: (event) => { requestContext.progress = window.AgentChat.progressLabel(event); refreshAiRequestUi(); },
+        onDelta: (text) => {
+          requestContext.partial += text;
+          if (aiThreadKey() !== key) return;
+          let partial = $('.ai-stream-text', aiQuestionMessages);
+          if (!partial) { renderAiConversation(); partial = $('.ai-stream-text', aiQuestionMessages); }
+          if (partial) partial.textContent = /^[\s`]*(?:json\s*)?[{\[]/i.test(requestContext.partial) ? '正在接收结构化响应，等待完整结果…' : requestContext.partial;
+          aiQuestionMessages.scrollTop = aiQuestionMessages.scrollHeight;
+        },
       });
-      let data = null;
-      data = await response.json().catch(() => null);
-      if (response.status === 409 && requestScope === 'question') {
-        throw Object.assign(new Error('review revision changed'), { revisionChanged: true });
-      }
-      if (!response.ok) {
-        const detail = typeof data?.error === 'string' ? data.error.trim() : '';
-        throw Object.assign(
-          new Error(detail || `assistant request failed: ${response.status}`),
-          { httpStatus: response.status, serverDetail: detail },
-        );
-      }
       if ((data?.scope && data.scope !== requestScope)
         || (requestScope === 'question' && data?.questionId && data.questionId !== requestQuestionId)) {
         throw Object.assign(new Error('assistant context mismatch'), { fallbackReason: 'invalid_response' });
@@ -2070,6 +2478,7 @@
       if (citations.length) assistantMessage.citations = citations;
       if (agent) assistantMessage.agent = agent;
       if (generation) assistantMessage.generation = generation;
+      if (Array.isArray(data.learningCitations)) assistantMessage.learningCitations = data.learningCitations.slice(0, 12);
       targetThread.push(assistantMessage);
       if (targetThread.length > THREAD_STORE_MAX) targetThread.splice(0, targetThread.length - THREAD_STORE_MAX);
       const input = $('#ai-question-input');
@@ -2082,18 +2491,24 @@
       }
       $('.ai-server-banner', aiQuestionPanel)?.remove();
     } catch (error) {
-      if (error?.name === 'AbortError') error.fallbackReason = 'upstream_timeout';
+      if (requestContext.cancelled) error.cancelled = true;
+      else if (error?.name === 'AbortError') error.fallbackReason = 'upstream_timeout';
       // Roll the unanswered user turn back out of the thread so a retry never
       // duplicates it, and give the input back to the user.
       const turnIndex = targetThread.indexOf(userTurn);
       if (turnIndex >= 0) targetThread.splice(turnIndex, 1);
-      aiFailures.set(key, { ...requestContext, notice: aiFailureNotice(error), retryable: !error?.revisionChanged });
       if (error?.revisionChanged) {
-        loadQuestionData();
+        const unsentDraft = aiThreadKey() === key ? $('#ai-question-input')?.value || cleanMessage : aiQuestionDrafts.get(key) || cleanMessage;
+        await loadQuestionData();
+        // Loading a new review snapshot correctly clears stale history, but
+        // must not throw away the learner's unanswered prompt or failure.
+        aiQuestionDrafts.set(key, unsentDraft);
+        if (aiThreadKey() === key) restoreAiDraft();
         showToast('试卷解析已更新，请重新查看本题后再提问');
       } else if (error instanceof TypeError) {
         aiShowServerBanner();
       }
+      aiFailures.set(key, { ...requestContext, notice: aiFailureNotice(error), retryable: !error?.revisionChanged });
       console.warn('AI chat request failed:', error);
     } finally {
       clearTimeout(timeout);
@@ -2106,24 +2521,48 @@
   }
 
   function pageAnnotations(pageNumber) {
-    return state.annotations.filter((annotation) => annotation.page === pageNumber);
+    if (annotationIndexDirty) {
+      annotationIndex.clear();
+      state.annotations.forEach((annotation) => {
+        if (!annotationIndex.has(annotation.page)) annotationIndex.set(annotation.page, new Map());
+        annotationIndex.get(annotation.page).set(annotation.id, annotation);
+      });
+      annotationIndexDirty = false;
+    }
+    return [...(annotationIndex.get(pageNumber)?.values() || [])];
   }
 
   function renderPageAnnotations(pageNumber) {
     const view = pageViews.get(pageNumber);
     if (!view) return;
-    view.markup.replaceChildren();
-    view.badgeLayer.replaceChildren();
-    pageAnnotations(pageNumber).forEach((annotation) => {
+    if (!view.annotationNodes) view.annotationNodes = new Map();
+    const annotations = pageAnnotations(pageNumber);
+    const present = new Set(annotations.map((item) => item.id));
+    view.annotationNodes.forEach((nodes, id) => {
+      if (!present.has(id)) {
+        nodes.group.remove();
+        nodes.badge?.remove();
+        view.annotationNodes.delete(id);
+      }
+    });
+    annotations.forEach((annotation) => {
+      const previous = view.annotationNodes.get(annotation.id);
+      if (previous?.annotation === annotation) return;
+      previous?.group.remove();
+      previous?.badge?.remove();
+      const group = createSvgElement('g', { 'data-annotation-id': annotation.id });
+      const nodes = { group, annotation, badge: null };
+      view.annotationNodes.set(annotation.id, nodes);
+      view.markup.append(group);
       if (annotation.type === 'line') {
-        view.markup.append(createSvgElement('line', {
+        group.append(createSvgElement('line', {
           x1: annotation.x1, y1: annotation.y1, x2: annotation.x2, y2: annotation.y2,
           stroke: annotation.color, 'stroke-width': annotation.width, class: 'mark-line',
         }));
         return;
       }
       annotation.rects.forEach((rect) => {
-        view.markup.append(createSvgElement('rect', {
+        group.append(createSvgElement('rect', {
           x: rect.x, y: rect.y, width: rect.width, height: rect.height, rx: annotation.type === 'tag' ? 1.4 : .8,
           class: annotation.type === 'highlight' ? 'mark-highlight' : `mark-tag-${annotation.tone}`,
           style: annotation.type === 'highlight' ? `--highlight-color:${annotation.color || '#f6d64a'}` : '',
@@ -2141,6 +2580,7 @@
           left: `${clamp(last.x + last.width + 2, 2, view.page.width - 82)}px`,
           top: `${clamp(last.y - 6, 2, view.page.height - 20)}px`,
         });
+        nodes.badge = badge;
         view.badgeLayer.append(badge);
       }
     });
@@ -2152,6 +2592,7 @@
   }
 
   function renderAnnotationPanel() {
+    updateNoteDraftUi();
     const lines = state.annotations.filter((item) => item.type === 'line');
     const highlights = state.annotations.filter((item) => item.type === 'highlight');
     const tags = state.annotations.filter((item) => item.type === 'tag');
@@ -2164,7 +2605,7 @@
     if (!tags.length) {
       const empty = document.createElement('li');
       empty.className = 'empty-record';
-      empty.textContent = '还没有标签。选择“查词 / 标签”后拖选试卷文字。';
+      empty.textContent = '拖选试卷文字，点击“笔记”记录想法。';
       list.append(empty);
       return;
     }
@@ -2183,6 +2624,7 @@
       quote.textContent = tag.quote || '已选文字';
       header.append(label, page);
       button.append(header, quote);
+      if (tag.note) button.append(makeElement('p', 'tag-record-note', tag.note));
       item.append(button);
       list.append(item);
     });
@@ -2214,21 +2656,24 @@
 
   function eraseAt(event, view) {
     const point = pointOnPage(event, view);
-    const removed = [];
-    state.annotations = state.annotations.filter((annotation) => {
-      if (annotation.page !== view.page.number || !annotationHit(annotation, point)) return true;
-      if (!erasedDuringGesture.some((item) => item.id === annotation.id)) removed.push(cloneAnnotation(annotation));
-      return false;
-    });
+    const removed = pageAnnotations(view.page.number).filter((annotation) => annotationHit(annotation, point));
     if (removed.length) {
-      erasedDuringGesture.push(...removed);
-      renderPageAnnotations(view.page.number);
-      renderAnnotationPanel();
+      const ids = new Set(removed.map((item) => item.id));
+      state.annotations = state.annotations.filter((annotation) => !ids.has(annotation.id));
+      erasedDuringGesture.push(...removed.map(cloneAnnotation));
+      removed.forEach((annotation) => {
+        annotationIndex.get(view.page.number)?.delete(annotation.id);
+        const nodes = view.annotationNodes?.get(annotation.id);
+        nodes?.group.remove();
+        nodes?.badge?.remove();
+        view.annotationNodes?.delete(annotation.id);
+      });
     }
   }
 
   function finishMarkupGesture(event, view) {
     if (!activePointer || event.pointerId !== activePointer.pointerId) return;
+    cancelAnimationFrame(activePointer.previewFrame);
     if (activePointer.tool === 'line' && event.type !== 'pointercancel') {
       const end = pointOnPage(event, view);
       const length = Math.hypot(end.x - activePointer.start.x, end.y - activePointer.start.y);
@@ -2250,6 +2695,7 @@
     try { view.markup.releasePointerCapture(event.pointerId); } catch { /* capture can already be released */ }
     activePointer = null;
     erasedDuringGesture = [];
+    $('[data-preview]', view.markup)?.remove();
     renderPageAnnotations(view.page.number);
     renderAnnotationPanel();
     save();
@@ -2261,7 +2707,7 @@
       if (event.pointerType === 'mouse' && event.button !== 0) return;
       event.preventDefault();
       const start = pointOnPage(event, view);
-      activePointer = { pointerId: event.pointerId, tool: state.tool, start, view };
+      activePointer = { pointerId: event.pointerId, tool: state.tool, start, view, previewFrame: 0 };
       erasedDuringGesture = [];
       view.markup.setPointerCapture(event.pointerId);
       if (state.tool === 'eraser') eraseAt(event, view);
@@ -2279,10 +2725,14 @@
       event.preventDefault();
       if (activePointer.tool === 'eraser') eraseAt(event, view);
       else {
-        const end = pointOnPage(event, view);
-        const preview = $('[data-preview]', view.markup);
-        preview?.setAttribute('x2', String(end.x));
-        preview?.setAttribute('y2', String(end.y));
+        activePointer.end = pointOnPage(event, view);
+        if (!activePointer.previewFrame) activePointer.previewFrame = requestAnimationFrame(() => {
+          if (!activePointer || activePointer.view !== view) return;
+          const preview = $('[data-preview]', view.markup);
+          preview?.setAttribute('x2', String(activePointer.end.x));
+          preview?.setAttribute('y2', String(activePointer.end.y));
+          activePointer.previewFrame = 0;
+        });
       }
     });
     view.markup.addEventListener('pointerup', (event) => finishMarkupGesture(event, view));
@@ -2356,10 +2806,12 @@
   }
 
   async function copyPendingSelection() {
-    if (!pendingCopy?.text) return;
-    const copied = await copyTextWithFallback(pendingCopy.text);
+    const source = pendingCopy;
+    if (!source?.text) return;
+    const copied = await copyTextWithFallback(source.text);
+    if (pendingCopy !== source) return;
     if (copied) {
-      const length = pendingCopy.text.length;
+      const length = source.text.length;
       closeSelectionCopyPanel();
       showToast(`已复制 ${length.toLocaleString('zh-CN')} 个字符`);
       return;
@@ -2371,11 +2823,126 @@
     showToast('自动复制未获授权，请手动复制所选文字');
   }
 
+  function hideSelectionToolbar({ clearSelection = false } = {}) {
+    selectionToolbar?.classList.remove('is-visible');
+    selectionToolbar?.setAttribute('aria-hidden', 'true');
+    selectionContext = null;
+    selectionRange = null;
+    if (clearSelection) window.getSelection()?.removeAllRanges();
+  }
+
+  function positionSelectionToolbar() {
+    if (!selectionContext || !selectionToolbar?.classList.contains('is-visible')) return;
+    const box = selectionRange?.getBoundingClientRect() || tagRectInViewport(selectionContext);
+    if (!box) return;
+    const width = selectionToolbar.offsetWidth;
+    const height = selectionToolbar.offsetHeight;
+    const left = clamp(box.left + box.width / 2 - width / 2, 8, Math.max(8, innerWidth - width - 8));
+    const top = box.top > height + 12 ? box.top - height - 8 : box.bottom + 8;
+    Object.assign(selectionToolbar.style, {
+      left: `${left}px`, top: `${clamp(top, 8, Math.max(8, innerHeight - height - 8))}px`,
+    });
+  }
+
+  function showSelectionToolbar(source, range = null) {
+    clearTimeout(selectionChangeTimer);
+    selectionContext = source;
+    selectionRange = range?.cloneRange() || null;
+    if (!selectionToolbar) return;
+    selectionToolbar.classList.add('is-visible');
+    selectionToolbar.setAttribute('aria-hidden', 'false');
+    const color = $('#selection-highlight-color');
+    if (color) color.value = source.color || state.highlightColor;
+    const lookup = $('[data-selection-action="lookup"]', selectionToolbar);
+    if (lookup) lookup.hidden = !source.lookupTarget;
+    positionSelectionToolbar();
+  }
+
+  function highlightSelection(source) {
+    if (!source) return;
+    const previous = source.highlightId && state.annotations.find((item) => item.id === source.highlightId);
+    const highlight = {
+      id: previous?.id || `highlight-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      type: 'highlight', page: source.page, rects: source.rects.map((rect) => ({ ...rect })),
+      quote: source.quote, wordIds: [...source.wordIds], color: state.highlightColor,
+      createdAt: previous?.createdAt || Date.now(),
+    };
+    if (previous) {
+      state.annotations = state.annotations.map((item) => item.id === previous.id ? highlight : item);
+      pushHistory({ kind: 'replace', before: cloneAnnotation(previous), after: cloneAnnotation(highlight), label: '修改荧光颜色' });
+    } else {
+      state.annotations.push(highlight);
+      pushHistory({ kind: 'add', items: [cloneAnnotation(highlight)], label: '荧光标记' });
+    }
+    hideSelectionToolbar({ clearSelection: true });
+    renderPageAnnotations(highlight.page);
+    renderAnnotationPanel();
+    save();
+  }
+
+  async function handleSelectionAction(action) {
+    const source = selectionContext;
+    if (!source) return;
+    if (action === 'dismiss') { hideSelectionToolbar({ clearSelection: true }); return; }
+    if (action === 'copy') {
+      const range = selectionRange?.cloneRange();
+      const copied = await copyTextWithFallback(source.text || source.quote);
+      if (selectionContext !== source) return;
+      if (copied) {
+        if (range && selectionContext === source) {
+          const selection = window.getSelection();
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        }
+        showToast('已复制所选文字');
+      } else {
+        hideSelectionToolbar();
+        openSelectionCopyPanel(source.text || source.quote, source.page);
+      }
+      return;
+    }
+    if (action === 'lookup' && source.lookupTarget) {
+      hideSelectionToolbar({ clearSelection: true });
+      openWordPopover(source.lookupTarget, cleanLookupWord(source.lookupTarget.dataset.word || source.lookupTarget.textContent));
+      return;
+    }
+    if (action === 'highlight') {
+      const color = $('#selection-highlight-color')?.value;
+      if (/^#[0-9a-f]{6}$/i.test(color || '')) state.highlightColor = color;
+      highlightSelection(source);
+      updateToolbar();
+      return;
+    }
+    if (action === 'note') {
+      closeTagEditor();
+      pendingSelection = source;
+      activeTag = null;
+      hideSelectionToolbar({ clearSelection: true });
+      openTagEditor();
+      return;
+    }
+    if (action === 'expression') {
+      const text = source.text || source.quote;
+      if (text.length > 2000) { showToast('单条表达最多 2,000 字符，请缩小选区。'); return; }
+      hideSelectionToolbar({ clearSelection: true });
+      window.LearningStore.showExpressionCapture({ text, context: { paper: paperId, question: '', page: source.page, module: 'reader' } });
+      return;
+    }
+    if (action === 'ai') {
+      if (aiChatBusy) { showToast('AI 正在回复，请稍候再提问'); return; }
+      aiSelectionText = (source.text || source.quote).slice(0, SELECTED_TEXT_MAX);
+      hideSelectionToolbar({ clearSelection: true });
+      openAiQuestionPanel();
+      setAiScope('selection');
+      $('#ai-question-input')?.focus({ preventScroll: true });
+    }
+  }
+
   function captureTextSelection() {
     // Annotation/copy actions below clear the browser Range. Retain the AI
     // passage first, including fast drags that beat selectionchange debounce.
     rememberPdfSelection();
-    if (!['select', 'copy', 'highlight'].includes(state.tool) || tagEditor?.contains(document.activeElement) || $('#selection-copy-panel')?.contains(document.activeElement)) return;
+    if (!['select', 'copy', 'highlight'].includes(state.tool) || tagEditor?.contains(document.activeElement) || $('#selection-copy-panel')?.contains(document.activeElement) || selectionToolbar?.contains(document.activeElement)) return;
     const selection = window.getSelection();
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) return;
     closeWordPopover();
@@ -2415,24 +2982,13 @@
     const rects = rectanglesForWords(words);
     const quote = words.map((word) => word.textContent.trim()).join(' ').replace(/\s+/g, ' ').trim().slice(0, 1200);
     const wordIds = words.map((word) => Number(word.dataset.wordId));
-    const selectionBox = range.getBoundingClientRect();
-    selection.removeAllRanges();
+    const text = selection.toString().replace(/\u00a0/g, ' ').trim().slice(0, 20000) || quote;
+    const source = { page, rects, quote, text, wordIds };
     if (state.tool === 'highlight') {
-      const highlight = {
-        id: `highlight-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        type: 'highlight', page, rects, quote, wordIds, color: state.highlightColor, createdAt: Date.now(),
-      };
-      state.annotations.push(highlight);
-      pushHistory({ kind: 'add', items: [cloneAnnotation(highlight)], label: '矩形荧光标记' });
-      renderPageAnnotations(page);
-      renderAnnotationPanel();
-      save();
-      showToast(`已用 ${rects.length} 个规整矩形覆盖所选文字`);
+      highlightSelection(source);
       return;
     }
-    pendingSelection = { page, rects, quote, wordIds, selectionBox };
-    activeTag = null;
-    openTagEditor();
+    showSelectionToolbar(source, range);
   }
 
   function tagRectInViewport(tag) {
@@ -2459,72 +3015,167 @@
     });
   }
 
-  function positionTagEditor(box) {
-    if (!box || !tagEditor) return;
-    if (matchMedia('(max-width: 680px)').matches) {
-      tagEditor.style.top = 'auto';
-      return;
+  function draftKeyForSource(source = activeTag || pendingSelection) {
+    if (!source) return '';
+    if (activeTag) return `tag:${source.id}`;
+    if (source.key?.startsWith('selection:')) return source.key;
+    const anchor = source.wordIds?.length ? source.wordIds.join(',') : JSON.stringify(source.rects);
+    return `selection:${source.page}:${anchor}`;
+  }
+
+  function updateNoteDraftUi(message = '') {
+    const resume = $('#resume-note-draft');
+    if (resume) {
+      resume.hidden = noteDrafts.length === 0;
+      resume.textContent = `继续未保存的笔记${noteDrafts.length > 1 ? `（${noteDrafts.length}）` : ''}`;
     }
-    const width = tagEditor.offsetWidth;
-    const height = tagEditor.offsetHeight;
-    const left = clamp(box.left + box.width / 2 - width / 2, 12, Math.max(12, innerWidth - width - 12));
-    const preferredTop = box.bottom + height + 12 > innerHeight ? box.top - height - 12 : box.bottom + 12;
-    Object.assign(tagEditor.style, { left: `${left}px`, top: `${clamp(preferredTop, 12, Math.max(12, innerHeight - height - 12))}px` });
+    const source = activeTag || pendingSelection;
+    const draft = source && noteDrafts.find((item) => item.key === draftKeyForSource(source));
+    const status = $('#note-draft-status');
+    if (status) status.textContent = message || (draft ? '草稿已保存在本机 · Ctrl / ⌘ + Enter 保存笔记' : 'Ctrl / ⌘ + Enter 保存笔记；收起后保留草稿');
+    const discard = $('#discard-note-draft');
+    if (discard) discard.hidden = !draft;
+    const panelToggle = $('#toggle-question-panel');
+    if (panelToggle && !questions.length && questionWorkspace?.hidden) {
+      panelToggle.hidden = false;
+      if (panelToggle.firstChild) panelToggle.firstChild.textContent = '笔记 ';
+      const count = $('#toolbar-answer-count');
+      if (count) count.textContent = String(state.annotations.filter((item) => item.type === 'tag').length);
+    }
+  }
+
+  function persistNoteDrafts() {
+    clearTimeout(noteDraftTimer);
+    try {
+      if (noteDrafts.length) localStorage.setItem(noteDraftKey, JSON.stringify(noteDrafts));
+      else localStorage.removeItem(noteDraftKey);
+      updateNoteDraftUi();
+      return true;
+    } catch {
+      updateNoteDraftUi('草稿保存失败，请复制正文或释放本地存储空间');
+      return false;
+    }
+  }
+
+  function rememberNoteDraft() {
+    const source = activeTag || pendingSelection;
+    if (!source || !tagEditor?.classList.contains('is-visible')) return;
+    const key = draftKeyForSource(source);
+    const label = tagLabelInput.value.slice(0, 16);
+    const note = tagNoteInput.value.slice(0, MAX_NOTE_CHARS);
+    const changed = label !== (activeTag?.label || '重点') || note !== (activeTag?.note || '')
+      || activeTagTone !== (activeTag?.tone || 'amber');
+    const index = noteDrafts.findIndex((item) => item.key === key);
+    if (!changed) {
+      if (index >= 0) noteDrafts.splice(index, 1);
+    } else {
+      const draft = { key, tagId: activeTag?.id || '', page: source.page,
+        rects: source.rects.map((rect) => ({ ...rect })), wordIds: [...(source.wordIds || [])],
+        quote: source.quote, label, note, tone: activeTagTone, updatedAt: Date.now() };
+      if (index >= 0) noteDrafts[index] = draft;
+      else noteDrafts.push(draft);
+    }
+    updateNoteDraftUi('草稿保存中…');
+    clearTimeout(noteDraftTimer);
+    noteDraftTimer = setTimeout(persistNoteDrafts, 180);
+  }
+
+  function removeCurrentNoteDraft() {
+    const key = draftKeyForSource();
+    const index = noteDrafts.findIndex((item) => item.key === key);
+    if (index >= 0) noteDrafts.splice(index, 1);
+    persistNoteDrafts();
+  }
+
+  function resumeNoteDraft() {
+    closeTagEditor();
+    const draft = [...noteDrafts].sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    if (!draft || !pageViews.has(draft.page)) return;
+    activeTag = draft.tagId ? state.annotations.find((item) => item.id === draft.tagId && item.type === 'tag') || null : null;
+    // If the saved annotation was removed, retain its draft as a new note.
+    if (!activeTag && draft.tagId) {
+      draft.tagId = '';
+      draft.key = `selection:${draft.page}:${draft.wordIds.length ? draft.wordIds.join(',') : JSON.stringify(draft.rects)}`;
+      persistNoteDrafts();
+    }
+    pendingSelection = activeTag ? null : draft;
+    hideSelectionToolbar({ clearSelection: true });
+    state.tool = 'select';
+    updateToolbar();
+    jumpToPage(draft.page, true);
+    openTagEditor();
   }
 
   function openTagEditor() {
     const source = activeTag || pendingSelection;
     if (!source || !tagEditor) return;
     closeWordPopover();
+    if (aiQuestionPanel?.classList.contains('is-visible')) closeAiQuestionPanel();
+    const draft = noteDrafts.find((item) => item.key === draftKeyForSource(source));
     $('#selected-quote').textContent = `“${source.quote || '已选文字'}”`;
-    setTagPreset(activeTag?.label || '重点', activeTag?.tone || 'amber');
-    tagNoteInput.value = activeTag?.note || '';
+    setTagPreset(draft?.label ?? activeTag?.label ?? '重点', draft?.tone || activeTag?.tone || 'amber');
+    tagNoteInput.value = draft?.note ?? activeTag?.note ?? '';
     tagDeleteButton.hidden = !activeTag;
     tagEditor.classList.add('is-visible');
     tagEditor.setAttribute('aria-hidden', 'false');
+    viewer.classList.add('is-note-editing');
+    applyScale();
+    updateNoteDraftUi();
     requestAnimationFrame(() => {
-      positionTagEditor(activeTag ? tagRectInViewport(activeTag) : pendingSelection.selectionBox);
-      tagLabelInput.focus();
-      tagLabelInput.select();
+      if (!tagEditor.classList.contains('is-visible')) return;
+      tagNoteInput.focus({ preventScroll: true });
+      tagNoteInput.setSelectionRange(tagNoteInput.value.length, tagNoteInput.value.length);
     });
   }
 
-  function closeTagEditor() {
+  function closeTagEditor({ retainDraft = true } = {}) {
+    if (retainDraft) {
+      rememberNoteDraft();
+      persistNoteDrafts();
+    }
     tagEditor?.classList.remove('is-visible');
     tagEditor?.setAttribute('aria-hidden', 'true');
+    const wasEditing = viewer.classList.contains('is-note-editing');
+    viewer.classList.remove('is-note-editing');
+    if (wasEditing) applyScale();
     activeTag = null;
     pendingSelection = null;
+    updateNoteDraftUi();
   }
 
   function saveTag() {
     const source = activeTag || pendingSelection;
-    const label = tagLabelInput.value.trim();
-    if (!source || !label) {
-      showToast('请填写标签名称');
-      tagLabelInput.focus();
-      return;
-    }
+    const label = tagLabelInput.value.trim() || '重点';
+    if (!source) return;
     const next = {
       id: activeTag?.id || `tag-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       type: 'tag', page: source.page,
       rects: source.rects.map((rect) => ({ ...rect })),
       quote: source.quote, wordIds: [...(source.wordIds || [])],
-      label: label.slice(0, 16), note: tagNoteInput.value.trim().slice(0, 260), tone: activeTagTone,
+      label: label.slice(0, 16), note: tagNoteInput.value.trim().slice(0, MAX_NOTE_CHARS), tone: activeTagTone,
       createdAt: activeTag?.createdAt || Date.now(),
     };
-    if (activeTag) {
-      const before = cloneAnnotation(activeTag);
-      state.annotations = state.annotations.map((item) => item.id === next.id ? next : item);
-      pushHistory({ kind: 'replace', before, after: cloneAnnotation(next), label: '修改标签' });
-    } else {
-      state.annotations.push(next);
-      pushHistory({ kind: 'add', items: [cloneAnnotation(next)], label: '添加标签' });
+    rememberNoteDraft();
+    persistNoteDrafts();
+    const previousAnnotations = state.annotations;
+    const action = activeTag
+      ? { kind: 'replace', before: cloneAnnotation(activeTag), after: cloneAnnotation(next), label: '修改笔记' }
+      : { kind: 'add', items: [cloneAnnotation(next)], label: '添加笔记' };
+    state.annotations = activeTag
+      ? state.annotations.map((item) => item.id === next.id ? next : item)
+      : [...state.annotations, next];
+    // Commit the note before clearing its recoverable draft. On quota errors,
+    // retain both the editor text and the previous saved annotations.
+    if (!save(true)) {
+      state.annotations = previousAnnotations;
+      return;
     }
-    closeTagEditor();
+    pushHistory(action);
+    removeCurrentNoteDraft();
+    closeTagEditor({ retainDraft: false });
     renderPageAnnotations(next.page);
     renderAnnotationPanel();
-    save();
-    showToast(`已保存标签：${next.label}`);
+    showToast(`已保存笔记：${next.label}`);
   }
 
   function deleteTag() {
@@ -2532,7 +3183,8 @@
     const removed = cloneAnnotation(activeTag);
     state.annotations = state.annotations.filter((item) => item.id !== removed.id);
     pushHistory({ kind: 'remove', items: [removed], label: '删除标签' });
-    closeTagEditor();
+    removeCurrentNoteDraft();
+    closeTagEditor({ retainDraft: false });
     renderPageAnnotations(removed.page);
     renderAnnotationPanel();
     save();
@@ -2540,39 +3192,59 @@
   }
 
   function openExistingTag(tag) {
+    closeTagEditor();
+    hideSelectionToolbar({ clearSelection: true });
     jumpToPage(tag.page, true);
     state.tool = 'select';
     updateToolbar();
-    setTimeout(() => {
-      activeTag = tag;
-      pendingSelection = null;
-      openTagEditor();
-    }, 260);
+    activeTag = tag;
+    pendingSelection = null;
+    openTagEditor();
   }
 
   function undo() {
     const action = state.history.pop();
     if (!action) return;
+    closeTagEditor();
+    state.redoHistory.push(action);
+    applyAnnotationHistory(action, true);
+    showToast(`已撤回：${action.label}`);
+  }
+
+  function redo() {
+    const action = state.redoHistory.pop();
+    if (!action) return;
+    closeTagEditor();
+    state.history.push(action);
+    applyAnnotationHistory(action, false);
+    showToast(`已重做：${action.label}`);
+  }
+
+  function applyAnnotationHistory(action, reverse) {
     const affectedPages = new Set();
-    if (action.kind === 'add') {
+    const kind = action.kind === 'replace' ? 'replace' : reverse
+      ? (action.kind === 'add' ? 'remove' : 'add') : action.kind;
+    if (kind === 'remove') {
       const ids = new Set(action.items.map((item) => item.id));
       action.items.forEach((item) => affectedPages.add(item.page));
       state.annotations = state.annotations.filter((item) => !ids.has(item.id));
-    } else if (action.kind === 'remove') {
+    } else if (kind === 'add') {
       action.items.forEach((item) => { state.annotations.push(cloneAnnotation(item)); affectedPages.add(item.page); });
-    } else if (action.kind === 'replace') {
-      state.annotations = state.annotations.map((item) => item.id === action.before.id ? cloneAnnotation(action.before) : item);
-      affectedPages.add(action.before.page);
+    } else if (kind === 'replace') {
+      const replacement = reverse ? action.before : action.after;
+      state.annotations = state.annotations.map((item) => item.id === replacement.id ? cloneAnnotation(replacement) : item);
+      affectedPages.add(replacement.page);
     }
+    annotationIndexDirty = true;
     affectedPages.forEach(renderPageAnnotations);
     renderAnnotationPanel();
     updateToolbar();
     save();
-    showToast(`已撤回：${action.label}`);
   }
 
   function setCurrentPage(pageNumber) {
     currentPage = clamp(pageNumber, 1, manifest?.pageCount || 1);
+    updateModuleHeaderLinks();
     const input = $('#current-page');
     if (input && document.activeElement !== input) input.value = String(currentPage);
     $('#previous-page').disabled = currentPage <= 1;
@@ -2584,13 +3256,28 @@
     const page = clamp(Number(pageNumber) || 1, 1, manifest?.pageCount || 1);
     const view = pageViews.get(page);
     if (!view) return;
-    view.shell.scrollIntoView({ behavior: smooth ? 'smooth' : 'auto', block: 'start' });
+    pageNavigationTarget = page;
+    // A question rail is left of the PDF. scrollIntoView can pan horizontally
+    // to expose it, pulling a centered, zoomed original towards the right.
+    // Locate pages vertically without changing the user's horizontal position.
+    viewport.scrollTo({
+      top: viewport.scrollTop + view.shell.getBoundingClientRect().top - viewport.getBoundingClientRect().top - viewport.clientTop,
+      left: viewport.scrollLeft,
+      behavior: smooth ? 'smooth' : 'auto',
+    });
     setCurrentPage(page);
   }
 
   function updateCurrentPageFromScroll() {
     cancelAnimationFrame(scrollFrame);
     scrollFrame = requestAnimationFrame(() => {
+      // At small zoom several pages can fit onscreen simultaneously. Preserve
+      // the user's explicit destination until they manually scroll, instead of
+      // letting the viewport-center heuristic select a different visible page.
+      if (pageNavigationTarget !== null) {
+        if (currentPage !== pageNavigationTarget) setCurrentPage(pageNavigationTarget);
+        return;
+      }
       const viewportBox = viewport.getBoundingClientRect();
       const targetY = viewportBox.top + viewportBox.height * .42;
       let nearestPage = currentPage;
@@ -2611,12 +3298,12 @@
     closeTagEditor();
     closeSelectionCopyPanel();
     closeWordPopover();
-    window.getSelection()?.removeAllRanges();
+    hideSelectionToolbar({ clearSelection: true });
     updateToolbar();
     renderAllPageQuestions();
     save();
     const hint = {
-      select: '单击查词并朗读；拖选一段文字记录标签',
+      select: '单击查词；拖选文字后可复制、高亮、记笔记或问 AI',
       copy: '拖选 PDF 文字，再点击“复制文本”',
       line: '按下起点并拖动，松开得到笔直线段',
       highlight: '拖选文字后会自动生成规整矩形荧光覆盖',
@@ -2630,7 +3317,7 @@
     if (aiLauncher) aiLauncher.hidden = !paperConfig.assistantUrl;
     try {
       const response = await fetch(manifestUrl, { headers: { Accept: 'application/json' } });
-      if (!response.ok) throw new Error(`manifest request failed: ${response.status}`);
+      if (!response.ok) throw Object.assign(new Error(`manifest request failed: ${response.status}`), { httpStatus: response.status });
       const payload = await response.json();
       manifest = payload?.manifest && typeof payload.manifest === 'object' ? payload.manifest : payload;
       if (!manifest || !Array.isArray(manifest.pages) || !manifest.pages.length) throw new Error('manifest has no pages');
@@ -2645,7 +3332,7 @@
       manifest.title = String(manifest.title || `试卷 ${paperId}`);
       viewer.dataset.paperId = paperId;
       $('#paper-title').textContent = manifest.title;
-      document.title = `${manifest.title} · CET-4 Exam Viewer`;
+      document.title = `${manifest.title} · CET 学习平台`;
       $('#page-count').textContent = String(manifest.pageCount);
       $('#sidebar-page-count').textContent = `${manifest.pageCount} 页`;
       $('#current-page').max = String(manifest.pageCount);
@@ -2661,14 +3348,29 @@
       manifest.pages.forEach((page) => { createPageView(page); createThumbnail(page); });
       applyScale();
       renderAllAnnotations();
+      updateNoteDraftUi();
       setCurrentPage(1);
       updateToolbar();
       $('#viewer-loading').hidden = true;
       configureExamAudio();
+      if (requestedPageNumber && pageViews.has(requestedPageNumber)) jumpToPage(requestedPageNumber);
+      const requestedTag = requestedNoteId && state.annotations.find((item) => item.type === 'tag' && item.id === requestedNoteId);
+      if (requestedTag) { jumpToPage(requestedTag.page); openExistingTag(requestedTag); }
       loadQuestionData();
     } catch (error) {
       const loading = $('#viewer-loading');
-      loading.innerHTML = '<p>完整试卷载入失败，请确认服务已启动后刷新页面。</p>';
+      loading.replaceChildren();
+      const missing = error.httpStatus === 404 || error.httpStatus === 410;
+      loading.append(makeElement('h2', '', missing ? '请先上传自己的试卷' : '试卷暂时无法载入'));
+      loading.append(makeElement('p', '', missing
+        ? '此试卷不在你的上传资料中。平台提供阅读、笔记与 AI 辅导工具，试卷、答案和听力由你上传。'
+        : '请确认本地服务已启动，或返回试卷库重试。已有学习记录仍保留在当前浏览器中。'));
+      const uploadLink = makeElement('a', 'primary-button', '上传试卷');
+      uploadLink.href = 'upload.html';
+      const libraryLink = makeElement('a', 'secondary-button', '我的试卷');
+      libraryLink.href = 'index.html#papers';
+      loading.append(uploadLink, document.createTextNode(' '), libraryLink);
+      if (aiLauncher) aiLauncher.hidden = true;
       console.error(error);
     }
   }
@@ -2681,6 +3383,21 @@
     save();
   });
   $('#undo-mark')?.addEventListener('click', undo);
+  $('#redo-mark')?.addEventListener('click', redo);
+  selectionToolbar?.addEventListener('pointerdown', (event) => {
+    // Keep the native selection when using a mouse action. Color inputs and
+    // keyboard navigation retain their normal focus behavior.
+    if (event.target.closest('button')) event.preventDefault();
+  });
+  selectionToolbar?.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-selection-action]');
+    if (button) handleSelectionAction(button.dataset.selectionAction);
+  });
+  $('#selection-highlight-color')?.addEventListener('input', (event) => {
+    state.highlightColor = event.currentTarget.value;
+    updateToolbar();
+    save();
+  });
   $('#previous-page')?.addEventListener('click', () => jumpToPage(currentPage - 1, true));
   $('#next-page')?.addEventListener('click', () => jumpToPage(currentPage + 1, true));
   $('#current-page')?.addEventListener('change', (event) => jumpToPage(event.currentTarget.value, true));
@@ -2697,22 +3414,27 @@
     rememberPdfSelection();
     selectionPointerActive = true;
     aiPointerDownInsidePanel = Boolean(event.target?.closest?.('#ai-question-panel'));
+    if (selectionContext && !event.target?.closest?.('#selection-toolbar, .page-text-layer')) hideSelectionToolbar();
   }, { passive: true, capture: true });
-  document.addEventListener('pointerup', () => {
+  document.addEventListener('pointerup', (event) => {
     selectionPointerActive = false;
-    if (aiPointerDownInsidePanel) return;
+    if (aiPointerDownInsidePanel || event.target?.closest?.('#selection-toolbar, #tag-editor, #selection-copy-panel')) return;
     rememberPdfSelection();
     setTimeout(captureTextSelection, 0);
   });
   document.addEventListener('pointercancel', () => { selectionPointerActive = false; });
   document.addEventListener('selectionchange', () => {
-    if (state.tool !== 'copy') return;
+    if (!['copy', 'select'].includes(state.tool)) return;
     clearTimeout(selectionChangeTimer);
     selectionChangeTimer = setTimeout(() => {
-      if (!selectionPointerActive && !matchMedia('(pointer: coarse)').matches) captureTextSelection();
-    }, 420);
+      if (!selectionPointerActive && (state.tool === 'select' || !matchMedia('(pointer: coarse)').matches)) {
+        if (selectionRange && window.getSelection()?.isCollapsed && !selectionToolbar?.contains(document.activeElement)) hideSelectionToolbar();
+        else captureTextSelection();
+      }
+    }, 180);
   });
   pagesNode?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-open-writing-template], [data-open-translation-template], [data-open-page-module]')) return;
     const questionOption = event.target.closest('[data-question-option]');
     if (questionOption) {
       event.preventDefault();
@@ -2755,6 +3477,13 @@
     const word = event.target.closest('.pdf-word');
     const selectedText = window.getSelection()?.toString().trim();
     if (word && state.tool === 'select' && !selectedText) {
+      const highlight = pageAnnotations(Number(word.dataset.page)).slice().reverse().find((item) =>
+        item.type === 'highlight' && item.wordIds.includes(Number(word.dataset.wordId)));
+      if (highlight) {
+        closeWordPopover();
+        showSelectionToolbar({ ...highlight, highlightId: highlight.id, text: highlight.quote, lookupTarget: word });
+        return;
+      }
       const value = cleanLookupWord(word.dataset.word || word.textContent);
       if (!value) return;
       event.preventDefault();
@@ -2766,6 +3495,12 @@
     if (button) jumpToQuestion(button.dataset.navigateQuestion, true);
   });
   questionDetail?.addEventListener('change', (event) => {
+    const librarySelect = event.target.closest('[data-writing-library-select]');
+    if (librarySelect) {
+      const button = $('[data-use-writing-library-template]', questionDetail);
+      if (button) button.disabled = !librarySelect.value;
+      return;
+    }
     const templateFile = event.target.closest('[data-writing-template-file]');
     if (templateFile) {
       const file = templateFile.files?.[0];
@@ -2793,6 +3528,11 @@
     if (textarea) updateLongAnswer(textarea.dataset.longAnswer, textarea.value);
   });
   questionDetail?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-open-writing-template], [data-open-translation-template]')) return;
+    const useLibraryTemplate = event.target.closest('[data-use-writing-library-template]');
+    if (useLibraryTemplate) { useWritingLibraryTemplate(useLibraryTemplate.dataset.useWritingLibraryTemplate); return; }
+    const saveLibraryTemplate = event.target.closest('[data-save-writing-library-template]');
+    if (saveLibraryTemplate) { saveWritingTemplateToLibrary(saveLibraryTemplate.dataset.saveWritingLibraryTemplate); return; }
     const importTemplate = event.target.closest('[data-import-writing-template]');
     if (importTemplate) {
       const fileInput = $('[data-writing-template-file]', questionDetail);
@@ -2865,13 +3605,24 @@
   $$('.ai-scope-switcher [data-ai-scope]').forEach((button) => {
     button.addEventListener('click', () => setAiScope(button.dataset.aiScope));
   });
-  $('#ai-new-chat')?.addEventListener('click', () => {
-    if (aiChatBusy) return;
-    activeAiThread().splice(0);
-    aiFailures.delete(aiThreadKey());
-    renderAiConversation();
-    save();
-    showToast('已开始新的对话（其他题目与模式的历史不受影响）');
+  $('#ai-new-chat')?.addEventListener('click', async () => {
+    if (aiChatBusy || aiResetBusy) return;
+    const key = aiThreadKey(); const scope = aiScope; const questionId = aiPanelQuestionId || state.currentQuestionId;
+    const thread = activeAiThread(); const id = state.aiConversations[key];
+    aiResetBusy = true; refreshAiRequestUi();
+    try {
+      if (id) await window.AgentChat.clearConversation({ url: paperConfig.assistantUrl, conversationId: id, scope, questionId });
+      thread.splice(0); aiFailures.delete(key); aiQuestionDrafts.delete(key);
+      state.aiConversations[key] = window.AgentChat.conversationId();
+      if (aiThreadKey() === key) restoreAiDraft();
+      save();
+      showToast('已开始新的对话；支持记忆的当前题目已先清除服务端记忆，其他会话不受影响');
+    } catch (_error) { showToast('服务端会话记忆未能清除，已保留当前对话，请稍后重试。'); }
+    finally { aiResetBusy = false; renderAiConversation(); }
+  });
+  $('#ai-stop-reply')?.addEventListener('click', () => {
+    if (!aiChatBusy || !aiActiveRequest) return;
+    aiActiveRequest.cancelled = true; aiActiveRequest.controller?.abort(); refreshAiRequestUi();
   });
   $('#ai-copy-last')?.addEventListener('click', async () => {
     const thread = activeAiThread();
@@ -2897,8 +3648,21 @@
     const tag = button && state.annotations.find((item) => item.id === button.dataset.recordTagId && item.type === 'tag');
     if (tag) openExistingTag(tag);
   });
-  $$('[data-tag-label]').forEach((button) => button.addEventListener('click', () => setTagPreset(button.dataset.tagLabel, button.dataset.tagTone)));
-  tagLabelInput?.addEventListener('input', () => $$('[data-tag-label]').forEach((button) => button.setAttribute('aria-checked', 'false')));
+  $$('[data-tag-label]').forEach((button) => button.addEventListener('click', () => {
+    setTagPreset(button.dataset.tagLabel, button.dataset.tagTone);
+    rememberNoteDraft();
+  }));
+  tagLabelInput?.addEventListener('input', () => {
+    $$('[data-tag-label]').forEach((button) => button.setAttribute('aria-checked', 'false'));
+    rememberNoteDraft();
+  });
+  tagNoteInput?.addEventListener('input', rememberNoteDraft);
+  $('#resume-note-draft')?.addEventListener('click', resumeNoteDraft);
+  $('#discard-note-draft')?.addEventListener('click', () => {
+    removeCurrentNoteDraft();
+    closeTagEditor({ retainDraft: false });
+    showToast('已丢弃当前草稿');
+  });
   $('#save-tag')?.addEventListener('click', saveTag);
   $('#cancel-tag')?.addEventListener('click', closeTagEditor);
   tagDeleteButton?.addEventListener('click', deleteTag);
@@ -2907,16 +3671,26 @@
   $('[data-close-selection-copy]')?.addEventListener('click', closeSelectionCopyPanel);
   viewport?.addEventListener('scroll', () => {
     updateCurrentPageFromScroll();
+    positionSelectionToolbar();
   }, { passive: true });
   addEventListener('resize', () => {
     applyScale();
-    if (activeTag) positionTagEditor(tagRectInViewport(activeTag));
+    positionSelectionToolbar();
   });
   document.addEventListener('keydown', (event) => {
-    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z' && !event.target.closest('input, textarea')) {
-      event.preventDefault(); undo(); return;
+    const typing = event.target.closest('input, textarea, [contenteditable="true"]');
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && tagEditor?.contains(event.target)
+      && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault(); saveTag(); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && !typing) {
+      if (event.key.toLowerCase() === 'z') {
+        event.preventDefault(); if (event.shiftKey) redo(); else undo(); return;
+      }
+      if (event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); return; }
     }
     if (event.key === 'Escape') {
+      hideSelectionToolbar({ clearSelection: true });
       if (tagEditor?.classList.contains('is-visible')) closeTagEditor();
       if ($('#selection-copy-panel')?.classList.contains('is-visible')) closeSelectionCopyPanel();
       closeWordPopover();
@@ -2928,6 +3702,33 @@
     if (event.key === 'Enter' && event.target === $('#current-page')) jumpToPage(event.target.value, true);
   });
   if ('ResizeObserver' in window && viewport) new ResizeObserver(applyScale).observe(viewport);
+  const releasePageNavigation = () => { pageNavigationTarget = null; };
+  viewport?.addEventListener('wheel', releasePageNavigation, { passive: true });
+  viewport?.addEventListener('touchstart', releasePageNavigation, { passive: true });
+  viewport?.addEventListener('pointerdown', releasePageNavigation, { passive: true });
+  viewport?.addEventListener('keydown', (event) => {
+    if (!event.target.closest('input, textarea, select, [contenteditable="true"]')
+      && ['ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown', ' '].includes(event.key)) releasePageNavigation();
+  });
+
+  document.addEventListener('click', (event) => {
+    const link = event.target.closest('[data-open-writing-template], [data-open-translation-template], [data-open-page-module], #open-writing-library, #open-translation-library');
+    if (!link || link.getAttribute('aria-disabled') === 'true') return;
+    const targetId = link.dataset.openWritingTemplate || link.dataset.openTranslationTemplate || link.dataset.moduleQuestion
+      || (link.id === 'open-writing-library' ? state.currentQuestionId : '');
+    const question = questions.find((item) => item.id === targetId);
+    const previousQuestion = state.currentQuestionId;
+    if (question) state.currentQuestionId = question.id;
+    rememberNoteDraft();
+    const draftSaved = (!noteDrafts.length && !tagEditor?.classList.contains('is-visible')) || persistNoteDrafts();
+    // Flush answers before following the normal anchor navigation. A failed
+    // write must not silently leave this page with the only copy of an essay.
+    if (!draftSaved || !save(true)) {
+      state.currentQuestionId = previousQuestion;
+      event.preventDefault();
+      showToast('作答或笔记尚未保存，已暂停跳转；请保留当前内容后重试');
+    }
+  });
 
   initialize();
 })();

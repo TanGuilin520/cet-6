@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>我的学习记录 · 英语学习平台</title>
+    <link rel="stylesheet" href="css/learning.css?v=20261008-learning-loop-1" />
+    <link rel="stylesheet" href="css/learning-page.css?v=20261008-learning-loop-1" />
+    <script defer src="js/writing-templates.js?v=20261008-learning-loop-1"></script>
+    <script defer src="js/learning-store.js?v=20261008-learning-loop-1"></script>
+    <script defer src="js/learning.js?v=20261008-learning-loop-1"></script>
+  </head>
+  <body>
+    <div class="learning-shell">
+      <header class="learning-header"><a class="learning-brand" href="index.html">英语学习平台 <small>MY LEARNING JOURNAL</small></a><nav aria-label="主导航"><a href="index.html">我的试卷</a><a href="writing.html">作文工作台</a><a href="translation.html">翻译工作台</a><a href="learning.html" aria-current="page">学习记录</a></nav></header>
+      <main>
+        <section class="learning-intro"><div><p class="learning-eyebrow">PRACTICE · REFLECT · REVISIT</p><h1>让每次练习，<span>都有迹可循</span></h1><p>试卷笔记、翻译对照、作文成稿与自己的表达，放在一起查找和复习。</p></div><p class="learning-local">资料保存在当前浏览器。备份包含个人学习内容，请妥善保存；这里不会自动上传笔记或调用 AI。</p></section>
+        <section class="learning-tools" aria-label="学习记录工具">
+          <div class="learning-search-row"><label>搜索记录<input id="learning-search" type="search" maxlength="120" placeholder="搜索原句、笔记、标签、方法…" /></label><label>记录类型<select id="learning-type"><option value="">全部记录</option><option value="reader">试卷笔记</option><option value="translation">翻译对照</option><option value="writing">作文成稿</option><option value="expression">句子与表达</option></select></label><label>试卷<select id="learning-paper"><option value="">全部试卷</option><option value="personal">独立资料</option></select></label></div>
+          <div class="learning-actions"><label class="learning-review-toggle"><input id="learning-review-mode" type="checkbox" /> 重练模式：先隐藏修改稿 / 成稿</label><button id="learning-refresh" type="button">刷新记录</button><button id="learning-new-expression" type="button">＋ 收藏表达</button><button id="learning-export-md" type="button">导出筛选结果 Markdown</button><button id="learning-export-json" type="button">JSON 整库备份</button><label class="learning-import" for="learning-backup-file">选择备份恢复<input id="learning-backup-file" type="file" accept=".json,application/json" /></label></div>
+          <div id="learning-import-preview" class="learning-import-preview" hidden><p id="learning-import-summary"></p><p>恢复前请关闭其他编辑页面。不会删除备份中未包含的资料；同标识记录以备份版本为准。确认后先下载本机现有资料备份，再执行合并。</p><button id="learning-confirm-import" class="learning-primary" type="button">确认合并恢复</button><button id="learning-cancel-import" type="button">取消</button></div>
+          <p id="learning-status" class="learning-status" role="status" aria-live="polite"></p>
+        </section>
+        <div class="learning-results-heading"><h2>我的积累</h2><span id="learning-count">0 条记录</span></div>
+        <div id="learning-records" class="learning-records"></div>
+      </main>
+      <footer>完整备份保留模板、草稿、方法、笔记、标注与试卷作答。Markdown 导出包含筛选记录的完整修改稿，不随重练模式隐藏。</footer>
+    </div>
+  </body>
+</html>

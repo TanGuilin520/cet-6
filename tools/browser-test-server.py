@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # Set before importing server.app: dotenv uses setdefault and cannot override us.
-for name in ("DEEPSEEK_API_KEY", "CET_AGENT_URL", "CET_AGENT_TOKEN", "CET_PADDLEOCR_URL"):
+for name in ("DEEPSEEK_API_KEY", "CET_AGENT_URL", "CET_AGENT_TOKEN", "CET_PADDLEOCR_URL", "CET_EMBEDDING_URL", "CET_EMBEDDING_TOKEN"):
     os.environ[name] = ""
 
 

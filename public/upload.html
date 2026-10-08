@@ -5,24 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="上传英语试卷、答案与听力，自动生成支持答题、批改、AI 辅导和标注的在线试卷。" />
     <meta name="theme-color" content="#183a5a" />
-    <title>导入试卷 · 四级真题库</title>
-    <link rel="stylesheet" href="css/upload.css" />
+    <title>上传试卷 · 英语学习平台</title>
+    <link rel="stylesheet" href="css/upload.css?v=20261007-platform-1" />
   </head>
   <body>
     <a class="skip-link" href="#exam-upload-form">跳到上传表单</a>
     <div class="upload-shell">
       <header class="upload-header">
-        <a class="upload-brand" href="index.html" aria-label="返回四级真题库首页">
+        <a class="upload-brand" href="index.html" aria-label="返回英语学习平台首页">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
-          <span><strong>四级真题库</strong><small>CET-4 PRACTICE</small></span>
+          <span><strong>英语学习平台</strong><small>YOUR ENGLISH WORKSPACE</small></span>
         </a>
         <nav class="upload-nav" aria-label="当前位置">
-          <a href="index.html#papers">试卷库</a>
+          <a href="index.html#papers">我的试卷</a>
           <span aria-current="page">导入试卷</span>
         </nav>
         <a class="header-back" href="index.html#papers">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14.5 5-7 7 7 7M8 12h10" /></svg>
-          <span>返回试卷库</span>
+          <span>返回我的试卷</span>
         </a>
       </header>
 
@@ -31,7 +31,7 @@
           <div class="upload-hero-copy">
             <p class="section-kicker"><span></span> PAPER IMPORT WORKFLOW</p>
             <h1 id="upload-title">把一份 PDF，变成<br /><em>可以答题的 AI 试卷</em></h1>
-            <p>上传原卷后，服务会保留每一页版式，提取文字坐标与题目结构，并在需要时启用 OCR。答案卷用于批改和按题辅导，听力音频可直接播放。</p>
+            <p>请提供自己的试卷 PDF，平台会保留原卷版式并解析题目。答案 PDF 和听力音频可选：上传答案后可辅助批改和按题辅导，上传音频后可完整播放；只上传试卷也可以阅读、标注和记笔记。</p>
           </div>
           <ol class="workflow-preview" aria-label="试卷处理步骤">
             <li><span>01</span><div><b>检查文件</b><small>验证 PDF 与附件</small></div></li>
@@ -57,7 +57,7 @@
             <form id="exam-upload-form" enctype="multipart/form-data" novalidate>
               <label class="text-field" for="exam-title">
                 <span>试卷名称 <small>可选，不填则使用 PDF 文件名</small></span>
-                <input id="exam-title" name="title" type="text" maxlength="120" autocomplete="off" placeholder="例如：2024 年 12 月四级真题（第 1 套）" />
+                <input id="exam-title" name="title" type="text" maxlength="120" autocomplete="off" placeholder="例如：我的英语阅读与翻译练习" />
                 <small class="field-error" id="exam-title-error" hidden></small>
               </label>
 
@@ -100,7 +100,7 @@
               <div class="form-notice">
                 <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 11v5m0-8h.01" /></svg>
                 <p>
-                  含文字层的 PDF 会直接提取坐标；扫描卷自动使用 OCR。低置信度题目、冲突答案和未识别题号会单独报告，不会自动补猜。
+                  平台不提供预置试卷或听力，请上传你自己的资料。含文字层的 PDF 会直接提取坐标；扫描卷在 OCR 可用时自动识别。低置信度题目、冲突答案和未识别题号会单独报告，不会自动补猜。
                   <span class="ocr-capability" id="ocr-capability" role="status">正在检测本机 OCR 能力…</span>
                 </p>
               </div>
@@ -162,8 +162,8 @@
                 <span aria-hidden="true">✓</span>
                 <div><b>完整试卷已经生成</b><p id="ready-summary">现在可以进入阅读器检查文字与版式。</p></div>
                 <div class="ready-actions">
-                  <a id="open-review" href="review.html">复核解析</a>
-                  <a id="open-reader" href="reader.html?paper=2021-06-01&amp;cachefix=2">打开试卷 <span aria-hidden="true">→</span></a>
+                  <a id="open-review" aria-disabled="true">复核解析</a>
+                  <a id="open-reader" aria-disabled="true">打开试卷 <span aria-hidden="true">→</span></a>
                 </div>
               </div>
             </section>
@@ -186,9 +186,9 @@
 
       <footer class="upload-footer">
         <p>文件仅用于生成当前试卷资源。处理时间取决于页数、扫描质量与是否需要 OCR。</p>
-        <a href="index.html#papers">返回试卷库 ↑</a>
+        <a href="index.html#papers">返回我的试卷 ↑</a>
       </footer>
     </div>
-    <script src="js/upload.js?v=20260824-unified-reader-3"></script>
+    <script src="js/upload.js?v=20261007-platform-1"></script>
   </body>
 </html>

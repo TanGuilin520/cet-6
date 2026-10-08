@@ -1,32 +1,11 @@
-const BUILT_IN_SOURCE_SHA256 = '688e243765c218d42d2a5fc5b54adb34247e6b3549da0a86ad2a39623d03a670';
 const EXAM_ID_PATTERN = /^exam-[0-9]{8}-[0-9a-f]{12}$/;
 const covers = ['ocean', 'coral', 'forest', 'violet', 'slate', 'gold'];
 
 function unifiedReaderUrl(paperId) {
-  return `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=2`;
+  return `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=20261007-platform-1`;
 }
 
-const builtInPaper = {
-  id: '2021-06-01',
-  runtimePaperId: '2021-06-01',
-  year: '2021',
-  period: '上半年',
-  month: '06',
-  set: '01',
-  title: '2021 年 6 月四级真题（第 1 套）',
-  tags: ['本地真题', '完整 8 页'],
-  difficulty: '真题',
-  cover: 'ocean',
-  duration: '125 分钟',
-  questions: '47 题',
-  questionCount: 47,
-  done: 0,
-  hasAudio: false,
-  hasAnswer: true,
-  hasQuestions: true,
-  isBuiltIn: true,
-};
-const papers = [builtInPaper];
+const papers = [];
 
 const state = {
   filter: 'all',
@@ -34,6 +13,8 @@ const state = {
   showOlder: false,
   favorites: loadFavorites(),
   favoriteOnly: false,
+  catalogStatus: 'loading',
+  pendingCount: 0,
 };
 
 const groupNode = document.querySelector('#paper-groups');
@@ -46,6 +27,8 @@ const dialog = document.querySelector('#paper-dialog');
 const dialogContent = document.querySelector('#dialog-content');
 const backdrop = document.querySelector('#dialog-backdrop');
 const toast = document.querySelector('#toast');
+const catalogError = document.querySelector('#catalog-error');
+const retryExams = document.querySelector('#retry-exams');
 let toastTimer;
 
 updatePaperTotal();
@@ -121,18 +104,17 @@ function normalizeApiPaper(item) {
     runtimePaperId: examId,
     ...date,
     title,
-    tags: ['AI 在线试卷', hasAudio ? '含听力' : hasAnswer ? '含答案' : '完整原卷'],
-    difficulty: hasAnswer ? '含解析' : '已生成',
+    tags: ['用户上传', hasAudio ? '含听力' : hasAnswer ? '含答案' : '原卷阅读'],
+    difficulty: hasAnswer ? '含答案' : '已生成',
     cover: coverForExam(examId),
-    duration: '125 分钟',
-    questions: hasQuestions ? `${total} 题` : '已解析',
+    questions: hasQuestions ? `${total} 题` : '原卷阅读',
     questionCount: hasQuestions ? total : 0,
     done: 0,
     hasAudio,
     hasAnswer,
     hasQuestions,
-    isBuiltIn: false,
-    paperSha256: /^[0-9a-f]{64}$/i.test(String(item.paperSha256 || '')) ? String(item.paperSha256).toLowerCase() : '',
+    pageCount: Number.isInteger(Number(item.result?.pageCount)) && Number(item.result?.pageCount) > 0
+      ? Number(item.result.pageCount) : 0,
   };
 }
 
@@ -154,17 +136,15 @@ function getFilteredPapers() {
 
 function renderPaperCard(paper) {
   const liked = state.favorites.has(paper.id);
-  const progressText = paper.done === 100 ? '已完成' : paper.done > 0 ? `已完成 ${paper.done}%` : `${paper.duration} · ${paper.questions}`;
+  const progressText = paper.done === 100 ? '已交卷' : paper.done > 0 ? `已完成 ${paper.done}%` : paper.questions;
   const paperId = esc(paper.id);
   const cover = covers.includes(paper.cover) ? paper.cover : 'ocean';
-  const coverKicker = paper.isBuiltIn ? 'CET-4 REAL PAPER' : 'AI ONLINE PAPER';
-  const coverLabel = paper.isBuiltIn ? '四级完整真题' : 'AI 在线试卷';
   return `
     <article class="paper-card">
       <div class="paper-card-cover cover-${cover}">
-        <div class="cover-top"><span>${esc(paper.year)} · ${esc(paper.month)}</span><span>SET ${esc(paper.set)}</span></div>
-        <div class="cover-label"><small>${coverKicker}</small><strong>${coverLabel}</strong></div>
-        <div class="cover-index">${esc(paper.set)}</div>
+        <div class="cover-top"><span>${esc(paper.year)} · ${esc(paper.month)}</span><span>用户上传</span></div>
+        <div class="cover-label"><small>YOUR ENGLISH PAPER</small><strong>我的英语试卷</strong></div>
+        <div class="cover-index">PDF</div>
       </div>
       <div class="paper-card-body">
         <div class="paper-card-title-row">
@@ -182,17 +162,11 @@ function renderPaperCard(paper) {
 function renderPapers() {
   papers.forEach((paper) => { paper.done = storedPaperProgress(paper); });
   const matchingPapers = getFilteredPapers();
-  const featuredPapers = matchingPapers.filter((paper) => paper.isBuiltIn);
-  const availableYears = [...new Set(papers.filter((paper) => !paper.isBuiltIn).map((paper) => paper.year))]
+  const availableYears = [...new Set(papers.map((paper) => paper.year))]
     .sort((left, right) => Number(right) - Number(left));
   const scopedView = state.favoriteOnly || Boolean(state.query) || state.filter !== 'all';
   const visibleYears = state.showOlder || scopedView ? availableYears : availableYears.slice(0, 2);
-  const filtered = matchingPapers.filter((paper) => !paper.isBuiltIn && visibleYears.includes(paper.year));
-  const featured = featuredPapers.length ? `
-    <section class="year-group" aria-labelledby="year-local-real">
-      <div class="year-heading"><h3 id="year-local-real">本地完整真题</h3><span></span><p>2021 年 6 月 · 8 页原卷</p></div>
-      <div class="paper-grid">${featuredPapers.map(renderPaperCard).join('')}</div>
-    </section>` : '';
+  const filtered = matchingPapers.filter((paper) => visibleYears.includes(paper.year));
   const groups = visibleYears.map((year) => {
     const yearPapers = filtered.filter((paper) => paper.year === year);
     if (!yearPapers.length) return '';
@@ -204,9 +178,30 @@ function renderPapers() {
       </section>`;
   }).join('');
 
-  groupNode.innerHTML = featured + groups;
-  const noMatches = !featuredPapers.length && !filtered.length;
-  emptyNode.hidden = !noMatches;
+  groupNode.innerHTML = groups;
+  groupNode.setAttribute('aria-busy', String(state.catalogStatus === 'loading'));
+  const noMatches = !filtered.length;
+  emptyNode.hidden = !noMatches || state.catalogStatus === 'error';
+  const emptyTitle = emptyNode.querySelector('h3');
+  const emptyDescription = emptyNode.querySelector('p');
+  const emptyUpload = document.querySelector('#empty-upload');
+  const resetFilter = emptyNode.querySelector('.reset-button');
+  if (state.catalogStatus === 'loading') {
+    emptyTitle.textContent = '正在读取你的试卷';
+    emptyDescription.textContent = '正在连接服务，读取已完成解析的上传记录。';
+  } else if (!papers.length) {
+    emptyTitle.textContent = state.pendingCount ? '已有上传记录待处理' : '从上传第一份试卷开始';
+    emptyDescription.textContent = state.pendingCount
+      ? '已有上传记录尚未生成可用试卷，请到上传页查看进度或处理结果。'
+      : '平台提供阅读、答题、笔记与 AI 辅导；试卷 PDF、答案和听力音频由你提供。';
+  } else {
+    emptyTitle.textContent = '没有找到相符的试卷';
+    emptyDescription.textContent = '换个关键词，或清除筛选条件再试一次。';
+  }
+  emptyUpload.hidden = Boolean(papers.length) || state.catalogStatus === 'loading';
+  emptyUpload.textContent = state.pendingCount ? '查看上传记录' : '上传第一份试卷';
+  resetFilter.hidden = !papers.length || state.catalogStatus === 'loading';
+  catalogError.hidden = state.catalogStatus !== 'error';
   loadMoreButton.hidden = availableYears.length <= 2 || state.favoriteOnly || Boolean(state.query) || state.filter !== 'all';
   loadMoreButton.classList.toggle('open', state.showOlder);
   loadMoreButton.querySelector('span').textContent = state.showOlder ? '收起较早年份' : '展开更多年份';
@@ -216,7 +211,8 @@ function renderPapers() {
 
 function updateFavoriteCount() {
   favoriteCount.textContent = String(papers.filter((paper) => state.favorites.has(paper.id)).length);
-  localStorage.setItem('cet4-favorites', JSON.stringify([...state.favorites]));
+  try { localStorage.setItem('cet4-favorites', JSON.stringify([...state.favorites])); }
+  catch { /* Browsing the catalog still works when browser storage is unavailable. */ }
 }
 
 function toggleFavorite(id) {
@@ -233,10 +229,10 @@ function toggleFavorite(id) {
 
 function paperSections(paper) {
   return [
-    ['A', '写作', '30 分钟 · 1 题'],
-    ['B', '听力理解', '25 分钟 · 25 题'],
-    ['C', '阅读理解', '40 分钟 · 30 题'],
-    ['D', '翻译', '30 分钟 · 1 题'],
+    ['PDF', '原卷阅读与笔记', paper.pageCount ? `${paper.pageCount} 页 · 支持选择、标注与笔记` : '保留原卷版式，支持选择、标注与笔记'],
+    ['Q', '在线作答', paper.hasQuestions ? `已识别 ${paper.questionCount} 道题目` : '暂未识别可交互题目，可先阅读原卷'],
+    ['AI', '答案与辅导', paper.hasAnswer ? '已识别上传的答案资料' : '未识别到答案，AI 回复会说明依据'],
+    ['♫', '听力播放', paper.hasAudio ? '已附用户上传的音频' : '未附听力音频'],
   ].map(([code, name, info]) => `<div class="paper-section-item"><span>${code}</span><div><b>${name}</b><small>${info}</small></div></div>`).join('');
 }
 
@@ -267,6 +263,24 @@ function storedPaperProgress(paper) {
   }
 }
 
+function hasStoredActivity(paper) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(`exam-viewer:${paper.runtimePaperId}:v1`) || '{}');
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) return false;
+    return stored.submitted === true
+      || Boolean(stored.currentQuestionId)
+      || (Array.isArray(stored.annotations) && stored.annotations.length > 0)
+      || (stored.answers && typeof stored.answers === 'object'
+        && Object.values(stored.answers).some((answer) => String(answer || '').trim()))
+      || (Array.isArray(stored.aiFreeHistory) && stored.aiFreeHistory.length > 0)
+      || (Array.isArray(stored.aiSelectionHistory) && stored.aiSelectionHistory.length > 0)
+      || (stored.aiHistory && typeof stored.aiHistory === 'object'
+        && Object.values(stored.aiHistory).some((thread) => Array.isArray(thread) && thread.length > 0));
+  } catch {
+    return false;
+  }
+}
+
 function openPaper(id, retainFocus = false) {
   const paper = papers.find((item) => item.id === id);
   if (!paper) return;
@@ -276,18 +290,18 @@ function openPaper(id, retainFocus = false) {
   const paperId = esc(paper.id);
   dialogContent.innerHTML = `
     <header class="dialog-header cover-${cover}">
-      <small>${esc(paper.year)} 年 · ${esc(paper.period)} · SET ${esc(paper.set)}</small>
+      <small>用户上传 · ${esc(paper.year)} 年 · ${esc(paper.period)}</small>
       <h2 id="dialog-paper-title">${esc(paper.title)}</h2>
-      <p>${esc(paper.duration)} · ${esc(paper.questions)} · ${esc(paperCapabilities(paper))}</p>
+      <p>${esc(paper.questions)} · ${esc(paperCapabilities(paper))}</p>
     </header>
     <div class="dialog-body">
-      <div class="dialog-progress"><p>${progress ? '本卷已有学习记录，可随时继续。' : '按真实考试顺序组织，开始后将自动保存。'}</p><strong>${progress ? `已完成 ${progress}%` : '未开始'}</strong></div>
+      <div class="dialog-progress"><p>${hasStoredActivity(paper) ? '本卷已有学习记录，可随时继续。' : '使用你上传的资料练习，作答和笔记会自动保存。'}</p><strong>${progress ? `已完成 ${progress}%` : hasStoredActivity(paper) ? '已有记录' : '未开始'}</strong></div>
       <div class="section-list">${paperSections(paper)}</div>
       <div class="dialog-actions">
         <button class="favorite-button ${liked ? 'is-favorite' : ''}" data-label="${liked ? '已收藏' : '收藏试卷'}" type="button" data-favorite="${paperId}" aria-pressed="${liked}">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 20-7-6.3A4.7 4.7 0 0 1 11.3 7L12 8l.7-1A4.7 4.7 0 0 1 19 13.7L12 20Z" /></svg>
         </button>
-        <button class="start-button" type="button" data-start-paper="${paperId}">${progress > 0 && progress < 100 ? '继续练习' : progress === 100 ? '查看复盘' : '开始整套练习'} <span aria-hidden="true">→</span></button>
+        <button class="start-button" type="button" data-start-paper="${paperId}">${progress > 0 && progress < 100 ? '继续练习' : progress === 100 ? '查看复盘' : '打开我的试卷'} <span aria-hidden="true">→</span></button>
       </div>
     </div>`;
   backdrop.hidden = false;
@@ -309,31 +323,43 @@ function startPaper(id) {
 
 function syncContinuePaper() {
   const continueButton = document.querySelector('.continue-button');
-  const target = papers.find((paper) => !paper.isBuiltIn) || builtInPaper;
-  if (!continueButton || !target) return;
-  continueButton.dataset.paperId = target.id;
+  if (!continueButton) return;
+  const target = papers.find(hasStoredActivity);
+  continueButton.disabled = !target;
+  if (target) continueButton.dataset.paperId = target.id;
+  else delete continueButton.dataset.paperId;
   const description = document.querySelector('#records .progress-copy p');
-  if (description) description.textContent = `继续「${target.title}」，进度会在完整试卷阅读器中自动保存。`;
-  const progress = Math.max(0, Math.min(100, Number(target.done) || 0));
+  if (description) description.textContent = target
+    ? `继续「${target.title}」，作答和笔记会在阅读器中自动保存。`
+    : state.catalogStatus === 'error' ? '暂时无法读取试卷，请在下方重新连接服务。'
+      : papers.length ? '打开下方试卷开始练习，保存后可以在这里继续。'
+        : '上传自己的试卷后开始练习，作答和笔记会自动保存。';
+  const progress = Math.max(0, Math.min(100, Number(target?.done) || 0));
   const value = document.querySelector('#continue-value');
   const bar = document.querySelector('#continue-bar');
   const progressNode = document.querySelector('.continue-progress');
-  if (value) value.textContent = `${progress}%`;
+  if (value) value.textContent = target ? (target.hasQuestions ? `${progress}%` : '已有记录') : '暂无记录';
   if (bar) bar.style.width = `${progress}%`;
-  if (progressNode) progressNode.setAttribute('aria-label', `当前练习进度 ${progress}%`);
+  if (progressNode) progressNode.setAttribute('aria-label', target ? `当前练习进度 ${progress}%` : '尚无练习记录');
 }
 
 async function loadReadyExams() {
+  if (retryExams.disabled) return;
+  state.catalogStatus = 'loading';
+  retryExams.disabled = true;
+  renderPapers();
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 8000);
   try {
     const response = await fetch('/api/exams', {
       headers: { Accept: 'application/json' },
       signal: controller.signal,
+      cache: 'no-store',
     });
     if (!response.ok) throw new Error(`exam catalog request failed: ${response.status}`);
     const payload = await response.json();
-    const items = Array.isArray(payload) ? payload : Array.isArray(payload?.exams) ? payload.exams : [];
+    const items = Array.isArray(payload) ? payload : payload?.exams;
+    if (!Array.isArray(items)) throw new Error('Invalid exam catalog response');
     const seen = new Set();
     const readyPapers = items.flatMap((item) => {
       const paper = normalizeApiPaper(item);
@@ -341,28 +367,20 @@ async function loadReadyExams() {
       seen.add(paper.id);
       return [paper];
     });
-    const builtInRuntime = readyPapers.find((paper) => paper.paperSha256 === BUILT_IN_SOURCE_SHA256);
-    if (builtInRuntime) {
-      builtInPaper.hasAudio ||= builtInRuntime.hasAudio;
-      builtInPaper.hasAnswer ||= builtInRuntime.hasAnswer;
-      if (builtInRuntime.questionCount > 0) {
-        builtInPaper.hasQuestions = true;
-        builtInPaper.questionCount = builtInRuntime.questionCount;
-        builtInPaper.questions = builtInRuntime.questions;
-      }
-      builtInPaper.difficulty = builtInPaper.hasAnswer ? '含解析' : '已生成';
-      builtInPaper.tags = ['本地真题', builtInPaper.hasAudio
-        ? (builtInPaper.hasAnswer ? '含听力与答案' : '含听力')
-        : (builtInPaper.hasAnswer ? '含答案' : '完整 8 页')];
-    }
-    const imported = readyPapers.filter((paper) => paper.paperSha256 !== BUILT_IN_SOURCE_SHA256);
-    papers.splice(1, papers.length - 1, ...imported);
+    papers.splice(0, papers.length, ...readyPapers);
+    state.pendingCount = items.filter((item) => item && item.status !== 'ready').length;
+    state.catalogStatus = 'ready';
     updatePaperTotal();
     renderPapers();
   } catch (error) {
-    console.warn('Ready exam catalog unavailable; using the built-in paper only.', error);
+    state.catalogStatus = 'error';
+    papers.splice(0, papers.length);
+    updatePaperTotal();
+    renderPapers();
+    console.warn('Uploaded exam catalog unavailable.', error);
   } finally {
     window.clearTimeout(timeout);
+    retryExams.disabled = false;
   }
 }
 
@@ -374,6 +392,10 @@ function showToast(message) {
 }
 
 document.addEventListener('click', (event) => {
+  if (event.target.closest('#retry-exams')) {
+    loadReadyExams();
+    return;
+  }
   if (event.target.closest('#upload-paper')) {
     window.location.href = 'upload.html';
     return;

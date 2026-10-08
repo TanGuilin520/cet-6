@@ -303,6 +303,9 @@ class PlatformAgentIntegrationTests(unittest.TestCase):
             "model": None,
             "deepseekModel": None,
             "message": "Agent runtime 可用",
+            "streaming": False,
+            "memory": False,
+            "dynamicTools": False,
         })
 
     def test_assistant_falls_back_when_agent_times_out_or_echoes_wrong_revision(self) -> None:

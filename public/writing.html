@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="带着当前作文题目，按开头、主体、结尾三段组织自己的模板，再补充词汇与句子，实时查看成稿。" />
+    <title>作文工作台 · 英语学习平台</title>
+    <link rel="stylesheet" href="css/learning.css?v=20261008-learning-loop-1" />
+    <link rel="stylesheet" href="css/writing.css?v=20261008-learning-loop-1" />
+    <script defer src="js/writing-templates.js?v=20261008-writing-workspace-1"></script>
+    <script defer src="js/learning-store.js?v=20261008-learning-loop-1"></script>
+    <script defer src="js/writing.js?v=20261008-learning-loop-1"></script>
+    <script defer src="js/writing-task.js?v=20261008-learning-loop-1"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#editor-title">跳到作文编辑区</a>
+    <div class="writing-shell">
+      <header class="writing-header">
+        <a class="writing-brand" href="index.html"><span class="brand-mark" aria-hidden="true">W</span><span><strong>英语学习平台</strong><small>YOUR WRITING WORKSPACE</small></span></a>
+        <nav aria-label="主导航"><a id="back-to-reader" href="index.html" hidden>返回当前试卷</a><a href="index.html#papers">我的试卷</a><a href="upload.html">导入试卷</a><a href="writing.html" aria-current="page">作文工作台</a><a id="open-translation-library" href="translation.html">翻译方法</a><a href="learning.html">学习记录</a></nav>
+      </header>
+      <main>
+        <section class="writing-intro">
+          <div><p class="eyebrow">YOUR WRITING WORKSPACE</p><h1>看清题目，<span>写好三段作文</span></h1><p>原题就在手边。用自己的模板组织开头、主体和结尾，把需要变化的词句设为填空，再查看完整成稿。</p></div>
+          <p class="local-notice">模板和草稿保存在当前浏览器，不会自动上传、云同步或调用 AI。重要内容请定期导出备份。</p>
+        </section>
+        <div class="workspace-toolbar"><div class="writing-editor-modes" role="group" aria-label="编辑用途"><button id="writing-scope-answer" type="button" aria-pressed="false">本题作答</button><button id="writing-scope-template" type="button" aria-pressed="true">我的模板</button></div><button id="writing-focus-mode" class="secondary-button" type="button" aria-pressed="false">专注编辑</button><p id="writing-scope-help">模板供不同试卷复用；本题作答单独保存，不会改写模板库。</p></div>
+        <nav class="writing-mobile-tabs" aria-label="工作台区域"><button type="button" data-writing-tab="answer" aria-pressed="true">作答</button><button type="button" data-writing-tab="methods" aria-pressed="false">模板与表达</button><button type="button" data-writing-tab="preview" aria-pressed="false">预览与填空</button></nav>
+        <div class="writing-workspace" data-mobile-tab="answer">
+          <aside class="library-panel" aria-labelledby="library-title">
+            <header class="panel-heading"><h2 id="library-title">我的模板</h2><span id="template-count">0 / 30</span></header>
+            <button id="new-template" class="primary-button" type="button">＋ 新建模板</button>
+            <div id="template-list" class="template-list" aria-label="已保存的作文模板"></div>
+            <section class="draft-section" id="draft-section" hidden><h3>未保存的草稿</h3><div id="draft-list" class="template-list" aria-label="独立保存的编辑草稿"></div></section>
+            <p class="library-hint">只有点击“保存模板”才会更新模板库。编辑中的内容会单独保留为草稿。</p>
+            <div id="writing-expression-library"></div>
+          </aside>
+          <section class="editor-panel" aria-labelledby="editor-title">
+            <section id="writing-task-panel" class="writing-task-panel" aria-labelledby="writing-task-title">
+              <div class="task-heading"><div><p class="eyebrow">CURRENT WRITING TASK</p><h2 id="writing-task-title">当前作文题目</h2></div><span id="writing-task-word-limit" class="task-limit" hidden></span><button id="writing-toggle-task" class="text-button" type="button" aria-expanded="true">收起题目</button></div>
+              <p id="writing-task-context" class="task-context">从试卷进入时，自动带入对应作文题目。</p>
+              <p id="writing-task-state" class="task-state" role="status" aria-live="polite">正在读取题目信息…</p>
+              <div id="writing-task-prompt" class="writing-task-prompt" hidden></div>
+            </section>
+            <header class="panel-heading"><div><p class="eyebrow">01 · ORGANIZE YOUR ESSAY</p><h2 id="editor-title" tabindex="-1">三段作文编辑</h2></div><span id="draft-state" class="state-badge">新模板</span></header>
+            <label class="field" for="template-name"><span id="writing-name-label">模板名称</span><input id="template-name" type="text" maxlength="80" placeholder="例如：观点论证 · 三段结构" autocomplete="off" /></label>
+            <div class="writing-editor-modes" role="group" aria-label="作文编辑模式"><button id="writing-mode-paragraphs" type="button" aria-pressed="true">三段编辑</button><button id="writing-mode-full" type="button" aria-pressed="false">完整正文</button></div>
+            <p id="writing-structure-state" class="structure-state" role="status" aria-live="polite">默认按三段组织作文；已有多段模板可继续使用完整正文，不会强制改写。</p>
+            <div id="writing-paragraph-editor" class="writing-paragraph-editor">
+              <section class="paragraph-card" aria-labelledby="writing-intro-title">
+                <div class="paragraph-heading"><div><span class="paragraph-number" aria-hidden="true">01</span><h3 id="writing-intro-title">开头段 <small>Introduction</small></h3></div><span id="writing-paragraph-intro-count" class="paragraph-count">0 词</span></div>
+                <p class="paragraph-purpose" id="writing-intro-help">引出题目，交代背景，明确你的观点或写作目的。</p>
+                <label class="visually-hidden" for="writing-paragraph-intro">开头段正文</label><textarea id="writing-paragraph-intro" rows="4" maxlength="12000" spellcheck="false" aria-describedby="writing-intro-help" placeholder="写下自己的开头，或粘贴熟悉的开头模板。可用 {{主题}} 留出需要变化的内容。"></textarea>
+              </section>
+              <section class="paragraph-card" aria-labelledby="writing-body-title">
+                <div class="paragraph-heading"><div><span class="paragraph-number" aria-hidden="true">02</span><h3 id="writing-body-title">主体段 <small>Body</small></h3></div><span id="writing-paragraph-body-count" class="paragraph-count">0 词</span></div>
+                <p class="paragraph-purpose" id="writing-body-help">围绕观点展开理由、建议或例子，用连接词串起表达。</p>
+                <label class="visually-hidden" for="writing-paragraph-body">主体段正文</label><textarea id="writing-paragraph-body" rows="6" maxlength="12000" spellcheck="false" aria-describedby="writing-body-help" placeholder="补充论点、理由和例子。将 {{理由}}、{{例子}} 等设为填空，方便替换自己的句子。"></textarea>
+              </section>
+              <section class="paragraph-card" aria-labelledby="writing-conclusion-title">
+                <div class="paragraph-heading"><div><span class="paragraph-number" aria-hidden="true">03</span><h3 id="writing-conclusion-title">结尾段 <small>Conclusion</small></h3></div><span id="writing-paragraph-conclusion-count" class="paragraph-count">0 词</span></div>
+                <p class="paragraph-purpose" id="writing-conclusion-help">回应题目，总结观点，再给出建议、期待或展望。</p>
+                <label class="visually-hidden" for="writing-paragraph-conclusion">结尾段正文</label><textarea id="writing-paragraph-conclusion" rows="4" maxlength="12000" spellcheck="false" aria-describedby="writing-conclusion-help" placeholder="用自己的结尾收束全文，避免加入尚未展开的新观点。"></textarea>
+              </section>
+            </div>
+            <div id="writing-full-editor" hidden><label class="field" for="template-source"><span>你的完整模板正文 <small>最多 12,000 字符</small></span><textarea id="template-source" rows="13" maxlength="12000" spellcheck="false" placeholder="粘贴你自己的模板。&#10;例如：In my view, {{主题}} matters because {{理由}}.&#10;这只是填空格式示例，不会作为预置模板保存。"></textarea></label></div>
+            <div class="slot-tools" aria-label="创建填空">
+              <label for="slot-name">填空名称<input id="slot-name" maxlength="80" placeholder="可选：主题、例子…" autocomplete="off" /></label>
+              <div class="slot-tool-actions"><button id="insert-word-slot" type="button">＋ 单词填空</button><button id="insert-sentence-slot" type="button">＋ 句子填空</button><button id="selection-to-slot" type="button">选中文字 → 填空</button></div>
+              <p>先在正在编辑的段落中选中文字，可保留原内容并转换成填空；也可在光标位置插入。手动输入 <code>{{名称}}</code> 同样有效，相同名称共用一份内容。</p>
+            </div>
+            <div class="editor-actions"><label class="secondary-button file-button" for="template-file">导入 TXT / MD<input id="template-file" type="file" accept=".txt,.md,text/plain,text/markdown" /></label><button id="save-template" type="button" class="primary-button">保存模板</button><button id="delete-template" type="button" class="danger-button" disabled>删除模板</button></div>
+            <p class="file-hint">导入 UTF-8 TXT / MD，最大 64 KB；导入只更新草稿，不会覆盖已保存的模板。</p>
+          </section>
+          <section class="preview-panel" aria-labelledby="preview-title">
+            <header class="panel-heading"><div><p class="eyebrow">02 · MAKE IT YOUR OWN</p><h2 id="preview-title">填入自己的表达</h2></div><span id="slot-count">0 个填空</span></header>
+            <p id="slot-help" class="slot-help">正文中还没有填空。可选中文字转换，或插入一个单词 / 句子填空。</p>
+            <div id="slot-fields" class="slot-fields"></div>
+            <div class="preview-heading"><h3>作文实时预览</h3><div><button id="export-source" type="button" class="text-button">原模板 MD</button><button id="export-template" type="button" class="text-button">成稿 TXT</button></div></div>
+            <p class="preview-hint">成稿 TXT 包含当前填入的内容；原模板 MD 保留所有 {{填空}} 供以后导入。导出不会自动保存模板。</p>
+            <div class="writing-length-summary"><span>成稿字数 <strong id="writing-word-count">0</strong> 词</span><p id="writing-length-state">按当前题目要求检查字数。</p></div>
+            <div id="writing-paragraph-preview" class="writing-paragraph-preview" tabindex="0" aria-label="三段作文实时预览"><p class="preview-empty">在中间写入各段内容，再在上方补充填空，即可查看三段成稿。</p></div>
+            <pre id="template-preview" class="template-preview" tabindex="0" hidden>在中间放入模板，即可在这里看到预览。</pre>
+          </section>
+        </div>
+        <div class="writing-answer-actions"><button id="writing-save-answer" class="secondary-button" type="button">保存本题草稿</button><button id="writing-apply-answer" class="primary-button" type="button" disabled>预览并应用到本题</button><a id="writing-bottom-back" class="secondary-button" href="index.html" hidden>返回试卷</a><button id="writing-reload-answer" class="text-button" type="button" hidden>重新载入另一窗口的草稿</button><p id="writing-apply-state" role="status">从试卷作文题进入后，可将完整成稿应用到对应题目。</p></div>
+        <p id="writing-status" class="writing-status" role="status" aria-live="polite">准备好后，从新建模板或导入文件开始。</p>
+      </main>
+      <footer>你的模板由你维护；套用之前，请根据题目要求检查内容、字数与表达是否合适。</footer>
+    </div>
+    <dialog id="writing-apply-dialog" aria-labelledby="writing-apply-title"><h2 id="writing-apply-title">确认本题成稿</h2><p id="writing-apply-context"></p><pre id="writing-apply-preview"></pre><p id="writing-apply-warning"></p><div class="editor-actions"><button id="writing-apply-cancel" class="secondary-button" type="button">继续编辑</button><button id="writing-apply-confirm" class="primary-button" type="button">应用到本题并返回</button></div></dialog>
+  </body>
+</html>

@@ -10,7 +10,9 @@ import os
 import statistics
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse, urlunparse
@@ -124,6 +126,20 @@ def evaluate_response(case: dict[str, Any], document: Any) -> list[str]:
         reply = document.get("reply") if isinstance(document.get("reply"), str) else ""
         if "replyContains" in expect and not _contains_all(reply, expect["replyContains"]):
             failures.append("reply is missing required safety text")
+        if "replyExcludes" in expect and any(fragment in reply for fragment in expect["replyExcludes"]):
+            failures.append("reply contains a forbidden answer claim")
+        if "expectedAnswer" in expect and str(expect["expectedAnswer"]) not in reply:
+            failures.append("reply is missing the reference answer marker")
+        if expect.get("citationSourcesMatch"):
+            metrics = response_metrics(case, document)
+            if metrics["sourceMatched"] != metrics["citationCount"]:
+                failures.append("citation excerpt not found in provided source evidence")
+        if "personalConsent" in expect and not expect["personalConsent"]:
+            if any("personal_note" in str(item.get("source", "")) or "personal_method" in str(item.get("source", "")) for item in citations if isinstance(item, dict)):
+                failures.append("personal evidence used without consent")
+        execution = document.get("execution", {})
+        if isinstance(execution, dict) and (execution.get("rounds", 0) > 4 or execution.get("toolCalls", 0) > 12):
+            failures.append("bounded Agent execution exceeded its limits")
     else:
         if document.get("schemaVersion") != "cet-agent-review-suggestion/1":
             failures.append("unexpected review schemaVersion")
@@ -145,6 +161,66 @@ def evaluate_response(case: dict[str, Any], document: Any) -> list[str]:
             if not _contains_all(rationale, expect["rationaleContains"]):
                 failures.append("rationale is missing required safety text")
     return failures
+
+
+def response_metrics(case: dict[str, Any], document: Any) -> dict[str, Any]:
+    """Observable evidence checks, not an LLM judge of semantic faithfulness.
+
+    Source-match means that citation text appears in the supplied evidence. It
+    does NOT prove every generated claim follows from that evidence.
+    """
+    if not isinstance(document, dict):
+        return {"citationCount": 0, "sourceMatched": 0, "tokenUsage": None}
+    context = case["request"].get("context", {})
+    normalize = lambda value: " ".join(str(value).split()).rstrip("…")
+    evidence = context.get("evidence", {})
+    texts = [normalize(item.get("content", "")) for channel in ("exact", "vector")
+             for item in evidence.get(channel, []) if isinstance(item, dict)]
+    answer = context.get("officialAnswer") or context.get("answer") or {}
+    combined = "；".join(part for part in (
+        f"答案：{answer.get('answer')}" if answer.get("answer") else "",
+        str(answer.get("explanation") or ""),
+    ) if part)
+    texts += [normalize(combined)]
+    texts += [normalize(item.get("text", "")) for item in context.get("learningEvidence", []) if isinstance(item, dict)]
+    texts += [normalize(str(item.get("title", "")) + "：" + str(item.get("text", ""))) for item in context.get("learningEvidence", []) if isinstance(item, dict)]
+    page = context.get("page") or {}
+    if isinstance(page, dict):
+        texts += [normalize(" ".join(str(item.get("text", "")) for item in page.get("words", []) if isinstance(item, dict)))]
+    citations = document.get("citations", document.get("evidence", []))
+    citations = citations if isinstance(citations, list) else []
+    matched = sum(bool(normalize(item.get("excerpt", item.get("text", "")))) and any(
+        normalize(item.get("excerpt", item.get("text", ""))) in source for source in texts if source
+    ) for item in citations if isinstance(item, dict))
+    generation = document.get("generation", {})
+    usage = generation.get("usage") if isinstance(generation, dict) else None
+    execution = document.get("execution", {})
+    expected = case["expect"].get("expectedAnswer")
+    marker = bool(expected and str(expected) in str(document.get("reply", ""))) if expected else None
+    return {"citationCount": len(citations), "sourceMatched": matched, "answerMarkerMatched": marker,
+            "tokenUsage": usage if isinstance(usage, dict) else None,
+            "rounds": execution.get("rounds", 0), "toolCalls": execution.get("toolCalls", 0)}
+
+
+def offline_runtime(path: Path):
+    sys.path.insert(0, str(PROJECT_ROOT))
+    from services.agent.app import AgentRuntime, DeepSeekClient
+    # Explicit empty config: never inherit the developer's funded API key.
+    runtime = AgentRuntime(checkpoint_path=path, deepseek=DeepSeekClient({}))
+    runtime.initialize()
+    if not runtime.ready:
+        raise EvalError("Offline evals require the project's installed .venv-agent runtime")
+    return runtime
+
+
+def offline_case(runtime, case):
+    from services.agent.app import validate_tutor_request, validate_review_request
+    started = time.monotonic()
+    if case["endpoint"] == "/v1/tutor":
+        result = runtime.invoke_tutor(validate_tutor_request(case["request"]))
+    else:
+        result = runtime.invoke_review(validate_review_request(case["request"]))
+    return result, int((time.monotonic() - started) * 1000)
 
 
 def request_case(origin: str, token: str, timeout: float, case: dict[str, Any]) -> tuple[dict[str, Any], int]:
@@ -190,6 +266,9 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--json", action="store_true", dest="json_output")
+    parser.add_argument("--offline", action="store_true", help="run real LangGraph with an explicit empty model configuration; no API calls")
+    parser.add_argument("--min-pass-rate", type=float, default=1.0, help="CI contract pass-rate threshold (0..1)")
+    parser.add_argument("--max-p95-ms", type=float, default=None, help="optional measured latency gate")
     args = parser.parse_args()
     try:
         cases = load_cases(args.cases)
@@ -198,23 +277,32 @@ def main() -> int:
             return 0
         if not math.isfinite(args.timeout) or not 0.2 <= args.timeout <= 120:
             raise EvalError("--timeout must be between 0.2 and 120 seconds")
-        origin = _origin(args.endpoint)
+        if not math.isfinite(args.min_pass_rate) or not 0 <= args.min_pass_rate <= 1:
+            raise EvalError("--min-pass-rate must be between 0 and 1")
+        if args.max_p95_ms is not None and (not math.isfinite(args.max_p95_ms) or args.max_p95_ms <= 0):
+            raise EvalError("--max-p95-ms must be positive")
+        origin = _origin(args.endpoint) if not args.offline else ""
         results: list[dict[str, Any]] = []
         durations: list[int] = []
-        for case in cases:
+        storage = TemporaryDirectory(prefix="cet-agent-eval-") if args.offline else nullcontext(None)
+        with storage as temporary:
+            runtime = offline_runtime(Path(temporary) / "checkpoints.sqlite3") if args.offline else None
             try:
-                document, duration_ms = request_case(origin, args.token, args.timeout, case)
-                failures = evaluate_response(case, document)
-            except EvalError as error:
-                duration_ms = 0
-                failures = [str(error)]
-            durations.append(duration_ms)
-            results.append({
-                "caseId": case["caseId"],
-                "passed": not failures,
-                "durationMs": duration_ms,
-                "failures": failures,
-            })
+                for case in cases:
+                    document = None
+                    try:
+                        document, duration_ms = offline_case(runtime, case) if runtime is not None else request_case(origin, args.token, args.timeout, case)
+                        failures = evaluate_response(case, document)
+                    except Exception as error:
+                        duration_ms = 0
+                        # Provider diagnostics/data never become eval output.
+                        failures = [str(error) if isinstance(error, EvalError) else "Case failed strict validation or runtime execution"]
+                    durations.append(duration_ms)
+                    results.append({"caseId": case["caseId"], "passed": not failures, "durationMs": duration_ms,
+                                    "failures": failures, "metrics": response_metrics(case, document)})
+            finally:
+                if runtime is not None:
+                    runtime.close()
         passed = sum(1 for item in results if item["passed"])
         report = {
             "schemaVersion": "cet-agent-eval-report/1",
@@ -228,7 +316,24 @@ def main() -> int:
                 "p95": percentile(durations, 0.95),
             },
             "results": results,
+            "mode": "offline_deterministic" if args.offline else "runtime_endpoint",
+            "qualityNote": "Source matching and answer markers are mechanical checks, not semantic faithfulness or teaching-quality scores.",
         }
+        metrics = [item["metrics"] for item in results]
+        citations = sum(item["citationCount"] for item in metrics)
+        source_matched = sum(item["sourceMatched"] for item in metrics)
+        answer_markers = [item["answerMarkerMatched"] for item in metrics if item.get("answerMarkerMatched") is not None]
+        usages = [item["tokenUsage"] for item in metrics if item["tokenUsage"] is not None]
+        report["quality"] = {"citationsChecked": citations, "citationSourceMatchRate": round(source_matched / citations, 4) if citations else None,
+                             "answerMarkerCases": len(answer_markers), "answerMarkerMatchRate": round(sum(answer_markers) / len(answer_markers), 4) if answer_markers else None}
+        report["usage"] = {"reportedCases": len(usages), "observedTotalTokens": sum(item.get("totalTokens", 0) for item in usages),
+                           "note": "Only provider-reported usage is counted; missing usage is unknown, not zero cost."}
+        gates = []
+        if report["passRate"] < args.min_pass_rate:
+            gates.append("pass_rate_below_threshold")
+        if args.max_p95_ms is not None and report["latencyMs"]["p95"] > args.max_p95_ms:
+            gates.append("p95_latency_above_threshold")
+        report["gates"] = {"passed": not gates, "failures": gates}
         if args.json_output:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         else:
@@ -240,7 +345,7 @@ def main() -> int:
                 f"Passed {passed}/{len(results)} · "
                 f"P50 {report['latencyMs']['p50']} ms · P95 {report['latencyMs']['p95']} ms"
             )
-        return 0 if passed == len(results) else 1
+        return 0 if not gates else 1
     except EvalError as error:
         print(f"Agent eval error: {error}", file=sys.stderr)
         return 2

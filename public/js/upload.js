@@ -4,7 +4,8 @@
   const $ = (selector, context = document) => context.querySelector(selector);
   const $$ = (selector, context = document) => [...context.querySelectorAll(selector)];
   const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
-  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=2`;
+  const examIdPattern = /^exam-[0-9]{8}-[0-9a-f]{12}$/;
+  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=20261007-platform-1`;
   const form = $('#exam-upload-form');
   const processingCard = $('#processing-card');
   const processingEmpty = $('#processing-empty');
@@ -479,6 +480,11 @@
     updateProcessing({ ...data, status: 'ready', progress: 100 });
     processingDetail?.setAttribute('aria-busy', 'false');
     const examId = String(data?.examId || activeExamId || '').trim();
+    if (!examIdPattern.test(examId)) {
+      setProcessingError('服务没有返回有效的试卷编号，请刷新上传记录后再打开。');
+      loadRecentExams();
+      return;
+    }
     activeExamId = examId;
     const reviews = reviewCountFrom(data);
     const readySummary = reviews && reviews > 0
@@ -486,9 +492,15 @@
       : '页面与文字层已生成，现在可以进入阅读器检查版式。';
     setText($('#ready-summary'), readySummary);
     const openReader = $('#open-reader');
-    if (openReader && examId) openReader.href = unifiedReaderUrl(examId);
+    if (openReader) {
+      openReader.href = unifiedReaderUrl(examId);
+      openReader.removeAttribute('aria-disabled');
+    }
     const openReview = $('#open-review');
-    if (openReview && examId) openReview.href = 'review.html?exam=' + encodeURIComponent(examId);
+    if (openReview) {
+      openReview.href = 'review.html?exam=' + encodeURIComponent(examId);
+      openReview.removeAttribute('aria-disabled');
+    }
     $('#processing-error').hidden = true;
     $('#processing-ready').hidden = false;
     $('#processing-ready').focus();
@@ -600,7 +612,7 @@
         const time = createElement('time', '', formatDate(exam?.createdAt || exam?.updatedAt));
         if (exam?.createdAt) time.dateTime = String(exam.createdAt);
         footer.append(time);
-        if (exam?.status === 'ready' && examId) {
+        if (exam?.status === 'ready' && examIdPattern.test(examId)) {
           const actions = createElement('span', 'recent-card-actions');
           const reviewLink = createElement('a', '', '复核');
           reviewLink.href = 'review.html?exam=' + encodeURIComponent(examId);

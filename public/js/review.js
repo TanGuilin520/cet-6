@@ -9,7 +9,7 @@
   const LONG_TYPES = new Set(['writing', 'translation']);
   const OPTION_LABELS = 'ABCDEFGHIJKLMNO';
   const GENERIC_REASONS = new Set(['修改', '调整', '复核', '确认', '修正', 'update', 'edit', 'review']);
-  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=2`;
+  const unifiedReaderUrl = (paperId) => `reader.html?paper=${encodeURIComponent(String(paperId))}&cachefix=20261007-platform-1`;
 
   const workspace = $('#review-workspace');
   const fatalState = $('#fatal-state');

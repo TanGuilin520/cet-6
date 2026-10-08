@@ -1,232 +1,108 @@
-# CET Agent 架构、运行与安全边界
+# CET Agent v1：运行、工具、记忆与安全边界
 
-本文描述可选的 `services/agent` LangGraph sidecar。它是在现有 PDF/OCR、复核版本和阅读器之上增加的受限 Agent 运行层，不替换原有解析 Pipeline，也不把确定性批改交给大模型。
+本轮保留原生阅读器和确定性的 PDF/OCR、答案绑定、批改及复核发布。Agent 是题目辅导的受限运行层，不是能任意访问电脑、自动改答案的通用助手。
 
-## 1. 当前定位
+## 1. 实际执行路径
 
-项目现在同时包含两类能力：
+| 模式 | 路径 | 服务端会话记忆 |
+| --- | --- | --- |
+| question | 已配置且 ready 时走 LangGraph；未配置可主服务直连 DeepSeek | LangGraph 路径可用 |
+| general | 主服务直连 DeepSeek，不读试卷答案 PDF | 无，使用受限客户端历史 |
+| selection | 主服务直连 DeepSeek，可附带授权学习证据 | 无，使用受限客户端历史 |
+| 复核建议 | 独立确定性 LangGraph 图，suggest_only | 无辅导会话 |
 
-- 确定性平台能力：文件校验、PDF/OCR、坐标、题目与答案版本、RAG 检索、客观题批改和 ETag 发布；
-- Agent 能力：按意图选择只读上下文工具、按题号优先组织证据、生成带引用的辅导回答，以及为复核问题生成只读字段建议。
+已配置 Agent 但请求失败时只给安全失败／资料提示，不隐式再发另一条付费模型请求。健康检查与配置存在不等于 Key、余额或真实教学效果已经验证。面板及 `/api/exams/capabilities` 显示实际 readiness。
 
-因此它属于“带 Agent 工作流的智能文档应用”，而不是允许模型任意访问系统的通用自治 Agent。这个边界是有意保留的：OCR、答案绑定、批改和版本发布必须继续可复现、可校验。
-
-## 1.1 模型接入与 generation 元数据
-
-Tutor 图只在 `draft_grounded_reply` 节点调用 DeepSeek（默认 `deepseek-v4-flash`，
-可配置 `deepseek-v4-pro`；旧名自动映射）。每次回答都会带版本化的 `generation`
-元数据：`used=true` 表示回复来自模型，否则为确定性回退并给出固定枚举的
-`fallbackReason`；usage 为官方 token 计数。上游错误正文与凭证不会进入响应、
-日志或 checkpoint。Review 图保持确定性 suggest-only，不调用任何模型。
-
-配置优先级：`CET_AGENT_DEEPSEEK_MODEL` → `DEEPSEEK_MODEL` → `deepseek-v4-flash`。
-Agent 模型超时（默认 25s）必须小于主服务的 Agent transport 超时（默认 40s）；
-主服务在 sidecar 已配置时每请求最多触发一次模型调用，传输失败只回退本地答案。
-
-## 2. 部署拓扑
+## 2. 部署与启动
 
 ```text
-Browser
-  ├── reader.html  ── 按题问答、引用与运行轨迹
-  └── review.html  ── 建议预览、人工应用到表单
-          │
-          ▼
-Python 3.11 main server :4173
-  ├── PDF/OCR/manifest/questions/answers
-  ├── revision + ETag + audit snapshot
-  ├── Question ID exact retrieval + local vector supplement
-  └── bounded Agent adapter
-          │ revision-pinned JSON + optional Bearer token
-          ▼
-Python 3.11 Agent sidecar :8770
-  ├── LangGraph state graphs
-  ├── SQLite checkpoints
-  ├── context-only tools
-  └── optional DeepSeek grounded drafting
+Browser reader / translation / review
+              │ same-origin JSON / SSE
+Python 3.11 main :4173
+  ├─ immutable exam revision + exact answer binding
+  ├─ BM25 / hash lexical + optional local dense / RRF
+  └─ validated bounded Agent context
+              │ local HTTP + Bearer token
+Python 3.11 LangGraph :8770
+  ├─ bounded model / context-tools loop
+  ├─ source guard + suggest-only review
+  └─ SQLite Run checkpoints + bounded conversation memory
 ```
 
-主服务与 sidecar 都运行在 Python 3.11（`.python-version` 统一目标）；主服务保持零第三方运行依赖，LangGraph 及其 SQLite checkpointer 只安装在 `.venv-agent` sidecar 环境。未启动或未配置 sidecar 时，上传、解析、阅读、人工复核、批改以及原来的保守问答仍可使用。
+主服务只依赖标准库。LangGraph 安装到独立 `.venv-agent`，两者都是 Python 3.11：
 
-## 3. 两条 Agent 工作流
-
-### Tutor graph
-
-```text
-route_intent
-  → read_context_tools
-  → retrieve_grounded_evidence
-  → draft_grounded_reply
-  → grounding_guard
-  → finalize_tutor
+```bash
+python3.11 -m venv .venv-agent
+.venv-agent/bin/python -m pip install -r services/agent/requirements.txt
+bash tools/start.sh
 ```
 
-- `route_intent` 区分选项解释、答案解析、证据定位、语言帮助和不允许的修改请求；
-- 上下文工具只能读取主服务已经锁定到同一 `reviewRevision` 的题目、答案和证据；
-- 检索顺序固定为 Question ID 精确结果优先、确定性向量结果补充；
-- `grounding_guard` 补齐“没有官方解析”的声明，并拒绝把资料不足伪装成官方结论；
-- Reader 保留旧的 `reply` 字段，同时按需展示 `citations`、工具状态、节点轨迹、Run ID 和耗时。
+`tools/start_platform.py` 读取主服务已有环境／项目 `.env`，检查本机 8770。依赖可用则先启动 Agent，再启动原主服务；没有 Token 时为两个自建子进程共享本次随机 Token。它不改 `.env`、不安装依赖、不下载模型、不调用 LLM。只复用同 Token 的 ready Agent；其它进程占用端口时不接管。Ctrl+C 只清理本次创建的子进程。
 
-### Review suggestion graph
+`CET_MANAGED_AGENT=0 bash tools/start.sh` 关闭联动；显式 `CET_AGENT_URL` 保留操作者配置。`.venv-main/bin/python -m server` 仍只启动主服务。手动 sidecar 不自动读取 `.env`，需显式提供相同 Token、模型环境和 checkpoint 路径，见 [runtime 文档](../services/agent/README.md)。
 
-```text
-load_review_issue
-  → retrieve_review_evidence
-  → build_suggest_only_proposal
-  → suggestion_policy_guard
-  → finalize_review_suggestion
-```
+## 3. 有界工具决策
 
-输出策略固定为 `suggest_only`。Agent 返回的是字段级 `proposals`，不是复核 PATCH，也没有写文件、写数据库或发布 revision 的工具。
+模型可用、请求不是禁止修改时，Tutor 图运行“意图路由 → 模型决策 → 白名单工具 → 再决策／回答 → 来源守卫 → 完成”。无模型时继续确定性的 context／retrieval／保守回答流程，无 Key 不访问模型网络。
 
-允许建议的字段只有：
+六种工具在 `services/agent/runtime_tools.py`：
 
-| 实体 | 字段 |
+- `get_current_question`：读取服务器批准的当前题；
+- `get_answer_record`：读取绑定当前题的上传／复核答案；
+- `retrieve_evidence`：在本次有限证据包中补查；
+- `retrieve_methods`：检索公开方法及本次明确授权的个人方法片段；
+- `retrieve_personal_notes`：只读取本次明确授权的个人资料；
+- `compare_options`：读取题目中存在的选项，不改写／计算正确答案。
+
+模型可以改变调用顺序、补查或询问用户。工具不能 Shell、任意 HTTP、浏览器自动化、遍历文件、写库或发布复核；不能索取另一份试卷。补查是在主服务已检索、固定版本的有限 context 内完成，不是无限制重新扫描全库。
+
+预算最多 4 轮决策、12 次工具调用、30 秒及约 8,000 token。输入估算与上游报告参与保护，单次输出也有限制；这不是账单硬上限。非法参数、重复 call ID、超时、预算和取消均会停止。`execution` 返回实际模式、轮数、调用次数与停止原因。usage 缺报是未知，不是免费。
+
+## 4. 检索和来源
+
+Question ID 精确证据永远优先，另一题只能提供背景，不能建立当前题的正确答案。方法 ID 精确检索同样优先，公开源文使用 SHA-256 revision。
+
+`server/retrieval.py` 默认 BM25＋哈希词项（`lexical_hash`）。明确配置、启动本地模型后，融合 dense 排名（RRF），可选本地 CrossEncoder；当前未预装或自动下载语义权重，不把哈希冒充 Embedding。模型服务只接受数值 loopback HTTP，拒绝公网、代理、跳转和客户端模型路径，见 [Embedding 文档](../services/embeddings/README.md)。
+
+缓存绑定试卷／方法版本、模型内容指纹、维度及正文，存向量／哈希不存正文；每次最多生成 128 个新 chunk 向量，大资料首次不足显示 `hybrid_semantic_partial`。服务失败明确词项回退，损坏缓存不覆盖。授权笔记 `persist=False`，只在当前请求排序，不写个人语义索引。
+
+学习来源的 `learningCitations / learningGrounding` 与官方答案 grounding 分离。没有官方解析必须声明“答案资料中没有找到官方解析，以下为 AI 辅助分析”。守卫和来源检查不构成生成内容语义正确的证明。
+
+## 5. 会话与授权撤销
+
+稳定 `conversationId` 与每次新 `runId` 分离；每次使用独立 Run checkpoint，避免恢复旧图重新引入撤销的证据。memory key 绑定试卷、题号、会话；范围指纹绑定 revision、当前题／答案、授权状态和私人正文。真实版本／私人内容变化清除旧范围及关联运行记录；公开排名或当前用户答案变化本身不应丢失正常会话。
+
+SQLite 最多保留最近 6 轮，每条最多 2,000 字符；旧轮提取片段为 1,200 字符摘要，不额外调用模型，不当官方事实。持久会话忽略客户端 history，避免重新注入撤销资料。默认最多保留 50 个会话和 50 个近期 Run，`CET_AGENT_CHECKPOINT_MAX_THREADS` 可调整 1–10000。
+
+新建对话／撤销个人授权明确请求删除旧会话及关联 checkpoint。无法确认删除时保留待删除标记，刷新后继续处理，并阻止继续携带旧私人上下文，不能只换 ID 就宣称已删除。清除还须阻止排队／正在生成的旧调用迟到后重新保存。
+
+这是本机单用户隐私保护，不是 Users、租户隔离、云同步或长期用户画像；同一浏览器／服务器的数据仍共享。清除不删除磁盘或外部备份副本。
+
+## 6. SSE 与公开接口
+
+`POST /api/exams/{id}/assistant/stream` 为同一助手调用输出安全节点／工具进度、心跳和终态结果。有界并发／队列和写超时，不暴露密钥、完整资料或思维链。最终 Markdown 仍整段返回，不是 DeepSeek token 流。
+
+停止按钮 abort 连接，主服务／sidecar 协作停止后续节点和保存。已执行的外部模型请求无法撤回、可能计费，不能保证退款；前端收到完整 result 才写最终历史。只有明确不支持 stream 路由才改用兼容 JSON，已经开始的模型请求失败不自动重发。
+
+| 接口 | 用途 |
 | --- | --- |
-| `question` | `stem`、`type`、`page`、`bbox`、`options` |
-| `answer` | `answer`、`explanation` |
+| `/api/exams/capabilities` | Agent／记忆／SSE／检索 readiness，不调用模型 |
+| `/api/exams/{id}/assistant` | 原三 scope 助手 |
+| `/api/exams/{id}/assistant/stream` | 真实进度、最终回复与协作取消 |
+| `/api/exams/{id}/assistant/conversations/clear` | 本机、same-origin、已验证题号的明确记忆清除 |
+| `/api/exams/{id}/agent/review-suggestions` | 当前 issue/revision 的只读建议 |
 
-`questionId` 和题号不会由 Agent 改写。Review 页面再次校验 schema、当前题号、revision、坐标、选项与答案关系；用户必须点击“应用到表单（不会保存）”，核对原卷并填写修改理由，最后才可通过原有 ETag PATCH 发布新版本。证据不足时 `proposals` 可以为空，页面会展示原因，不要求 Agent 猜测。
+复核图仍是 suggest_only，只允许 question 的 stem/type/page/bbox/options 和 answer 的 answer/explanation；不改题号／ID、不调用模型、不能自动 PATCH。用户应用到表单、核查、填理由，由既有 ETag 流程发布。这是应用层 Human-in-the-loop，尚无 LangGraph interrupt/resume 跨进程审批 API。
 
-这是应用层 Human-in-the-loop：Agent 负责建议，既有复核工作台负责人工批准和确定性写入。当前没有把浏览器等待状态伪装成一个长期挂起的模型调用。
-
-## 4. 启动 Agent runtime
-
-创建独立环境：
-
-```bash
-.venv-main/bin/python -m venv .venv-agent  # 同一 3.11 解释器，依赖隔离
-.venv-agent/bin/pip install -r services/agent/requirements.txt
-```
-
-生成一段只供本机服务间使用的随机 Token，并分别提供给 sidecar 和主服务。sidecar 不会自动读取项目 `.env`，本地启动时显式传入：
+## 7. 验证及下一阶段
 
 ```bash
-CET_AGENT_TOKEN='替换为随机Token' \
-CET_AGENT_CHECKPOINT_PATH="$PWD/data/agent/checkpoints.sqlite3" \
-DEEPSEEK_API_KEY='替换为DeepSeek密钥' \
-.venv-agent/bin/python -m services.agent.app --host 127.0.0.1 --port 8770
+env DEEPSEEK_API_KEY= CET_AGENT_URL= CET_EMBEDDING_URL= .venv-agent/bin/python -m unittest discover -s tests -v
+.venv-agent/bin/python tools/run_agent_evals.py --validate-only
+.venv-agent/bin/python tools/run_agent_evals.py --cases evals/agent_v1_cases.jsonl --offline --min-pass-rate 1 --json
+npm run test:browser
 ```
 
-`DEEPSEEK_API_KEY` 是可选项。没有密钥时 Agent 仍能运行确定性路由、检索、引用、保守回答和复核建议，不会调用外部模型。
+保留原 5 条案例，新增 60 条合成 v1 案例：路由、资料绑定、只读、授权、来源原文匹配与答案标记。来源匹配不等于语义蕴含，答案标记不等于教学质量；离线模式不代表真实 DeepSeek 的质量／成本或本地模型 Recall，见 [评测说明](../evals/README.md)。动态决策及语义 paraphrase 另用 mock 模型单测覆盖。
 
-在项目根目录 `.env` 中配置主服务适配器：
-
-```dotenv
-CET_AGENT_URL=http://127.0.0.1:8770
-CET_AGENT_TOKEN=与sidecar相同的Token
-CET_AGENT_TIMEOUT_SECONDS=40
-```
-
-再启动主服务：
-
-```bash
-python3 -m server
-```
-
-可检查 sidecar 自身健康状态：
-
-```bash
-curl -H 'Authorization: Bearer 替换为随机Token' http://127.0.0.1:8770/healthz
-```
-
-也可访问主服务的 `GET /api/exams/capabilities`，查看 `agent.configured`、`reachable`、`ready`、LangGraph、checkpoint 和 DeepSeek 状态。健康检查不会泄露 Token、密钥或 checkpoint 路径。
-
-## 5. 浏览器公开契约
-
-### 获取复核建议
-
-```http
-POST /api/exams/{examId}/agent/review-suggestions
-Content-Type: application/json
-
-{"issueId":"...","reviewRevision":3}
-```
-
-核心响应：
-
-```json
-{
-  "schemaVersion": "cet-agent-review-suggestion/1",
-  "policy": "suggest_only",
-  "reviewRevision": 3,
-  "issueId": "...",
-  "proposals": [
-    {
-      "op": "replace",
-      "entity": "answer",
-      "questionId": "q26",
-      "field": "answer",
-      "value": "C",
-      "confidence": 0.95,
-      "evidenceSources": ["answer_pdf"]
-    }
-  ],
-  "rationale": "...",
-  "evidence": [],
-  "cautions": [],
-  "trace": {"nodes": ["load_review_issue"], "durationMs": 18}
-}
-```
-
-主服务在调用 sidecar 之前已经解析 `issueId` 并锁定当前快照；revision 变化返回 `409`，问题不存在返回 `404`，sidecar 未配置或不可用返回 `503`，sidecar 协议无效返回 `502`。这些错误都不会降级成自动修改。
-
-### 按题辅导的增量字段
-
-既有 `POST /api/exams/{examId}/assistant` 请求和 `reply` 响应保持兼容。成功走 Agent 时额外返回：
-
-```json
-{
-  "citations": [
-    {"source": "answer_pdf", "questionId": "q26", "page": 2, "excerpt": "..."}
-  ],
-  "agent": {
-    "runId": "...",
-    "intent": "option_explanation",
-    "tools": [{"name": "retrieve_evidence", "status": "completed"}],
-    "trace": {"nodes": ["route_intent", "retrieve_grounded_evidence"], "durationMs": 24}
-  }
-}
-```
-
-旧服务只返回回答正文时，Reader 继续按旧方式显示；新字段存在时才出现可折叠的“资料依据”和“Agent 运行”。所有外部字符串都通过 `textContent` 写入 DOM，不解释为 HTML，也不把服务端提供的任意 URL 变成可点击链接。
-
-## 6. 安全与失败策略
-
-- sidecar 工具只读取请求中的受限 context；没有 Shell、浏览器、任意 HTTP、文件系统或数据库写入工具；
-- 主服务不把本机路径、API Key 或复核写权限交给 Agent；
-- 浏览器只能访问主服务公开路由，不能替 Agent 构造任意内部 context；
-- 请求、响应、历史、证据和模型输出都有数量与长度上限，并采用严格 JSON schema；
-- `examId + questionId + reviewRevision` 共同限定辅导上下文，复核建议还绑定 `issueId`；
-- sidecar 使用 Bearer Token 做服务间认证，默认只监听 `127.0.0.1`；
-- DeepSeek 失败、模型输出无效或 sidecar 不可用时，主服务回退到既有保守路径；
-- sidecar 模型超时默认 25 秒，主服务 Agent transport 超时默认 40 秒，使慢模型优先在 sidecar 内完成保守降级，减少重复上游请求；
-- 不向界面暴露隐藏推理过程，只展示节点名、工具状态、引用、Run ID 和耗时；
-- checkpoint 用于运行状态与故障审计，不代替不可变 review revision，也不授权自动发布。
-- checkpoint 默认只保留最近 50 个运行线程（含失败运行），可用 `CET_AGENT_CHECKPOINT_MAX_THREADS` 在 1–10000 范围调整，避免每次新 Run 导致 SQLite 无界增长。
-
-当前仍是本地单用户系统。若通过反向代理暴露公网，必须先增加用户鉴权、租户隔离、CSRF/Origin 策略、限流、日志脱敏和密钥管理；仅依靠 loopback 与共享 Token 不构成公网安全方案。
-
-## 7. 验证与后续工程化
-
-基础回归：
-
-```bash
-node --check public/js/review.js
-node --check public/js/reader.js
-python3 -m py_compile server/agent_client.py services/agent/app.py
-python3 -m unittest discover -s tests -v
-python3 tools/run_agent_evals.py --validate-only
-```
-
-`evals/agent_cases.jsonl` 已提供不含真题版权内容的固定黄金案例。启动 sidecar 后执行
-`python3 tools/run_agent_evals.py`，可得到意图路由、工具、grounding、只读策略的通过率及 P50/P95 延迟；`--json` 适合接入 CI。
-
-下一阶段适合补充的求职展示能力：
-
-1. 用 OpenTelemetry/OpenInference 接入 Phoenix，保留当前前端简洁 trace 作为用户可见审计摘要；
-2. 把题目、答案和检索封装成只读 MCP Server，写工具继续要求真实身份与人工批准；
-3. 将本地哈希向量升级为 BM25 + 语义 Embedding + reranker，并用 Recall@k/MRR 量化，而不是只替换数据库名称；
-4. 把现有黄金案例扩充到人工复核生成的数据集，并加入 prompt/model/retriever 版本对比与 CI 阈值；
-5. 在确有跨进程等待需求时，为复核图增加 LangGraph `interrupt/resume` API，而不是让模型请求长期占用浏览器连接。
-
-面试演示应重点展示一次完整闭环：发现低置信问题 → Agent 读取受限证据 → 返回字段级建议 → 人工应用但尚未保存 → ETag 发布新 revision → Reader 在新 revision 下给出带引用回答。这个流程比增加多个互相聊天的 Agent 更能说明工程可靠性。
+后续应补人工标注 Recall@k/MRR、真实模型结论支持度／提示质量，以及经授权的 latency/cost 测量。公网部署前先补身份、租户／试卷授权、CSRF、配额、脱敏及密钥管理；loopback 和共享 Token 不是公网鉴权。MCP、多 Agent、监控平台、可恢复审批按需求增加，暂不作为已完成技术。
